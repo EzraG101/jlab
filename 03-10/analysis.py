@@ -6,22 +6,32 @@ from scipy.signal import find_peaks
 # ==============================
 # Adjustable Parameters
 # ==============================
-SMOOTH_FACTOR = 210      # Increase if too noisy
-MIN_PROMINENCE = 0.05   # Fraction of max height (increase to remove small peaks)
-MIN_DISTANCE = 80       # Minimum bin separation between peaks
+SMOOTH_FACTOR = 120
+MIN_PROMINENCE = 0.05
+MIN_DISTANCE = 80
 
-RECOIL_SLOPE = 0.35074
-SCATTER_SLOPE = 0.32764
-RECOIL_INTERCEPT = -8.71344
-SCATTER_INTERCEPT = -11.64004
+RECOIL_SLOPE = 0.70107
+RECOIL_INTERCEPT = -8.40091
+SCATTER_SLOPE = 0.65156
+SCATTER_INTERCEPT = -8.21614
 
 # ==============================
-# List of .Spe files
+# Files organized by angle
 # ==============================
-spe_files = [
-    '03-10-Cs137-recoil-250.Spe',
-    '03-10-Cs-137-scatter-250.Spe',
-]
+spe_files = {
+    220: [
+        "03-10-Cs137-Recoil-220.Spe",
+        "03-10-Cs137-Scatter-220.Spe"
+    ],
+    250: [
+        "03-10-Cs137-Recoil-250.Spe",
+        "03-10-Cs137-Scatter-250.Spe"
+    ],
+    310: [
+        "03-10-Cs137-Recoil-310.Spe",
+        "03-10-Cs137-Scatter-310.Spe"
+    ]
+}
 
 # ==============================
 # Read .Spe histogram
@@ -31,7 +41,7 @@ def read_spe_histogram(filename):
         lines = f.readlines()
 
     try:
-        start_idx = next(i for i, line in enumerate(lines) if '<<DATA>>' in line) + 1
+        start_idx = next(i for i, line in enumerate(lines) if "<<DATA>>" in line) + 1
     except StopIteration:
         start_idx = 0
 
@@ -45,47 +55,60 @@ def read_spe_histogram(filename):
     return np.array(data)
 
 # ==============================
+# Rebin
+# ==============================
+def rebin(hist, factor=2):
+    n = len(hist) // factor
+    hist = hist[:n * factor]
+    return hist.reshape(n, factor).sum(axis=1)
+
+# ==============================
 # Smooth + Peak Detection
 # ==============================
 def fit_and_find_maxima(hist):
-    x = np.arange(len(hist))
-
-    # Strong smoothing spline
-    spline = UnivariateSpline(x, hist, s=SMOOTH_FACTOR * len(hist))
-    y_smooth = spline(x)
-
-    # Peak detection with filtering
-    peaks, properties = find_peaks(
-        y_smooth,
-        prominence=MIN_PROMINENCE * np.max(y_smooth),
-        distance=MIN_DISTANCE
-    )
-
-    return peaks, y_smooth
+    max_bin = np.argmax(hist)      # bin of absolute maximum
+    return np.array([max_bin])
 
 # ==============================
-# Load histograms
+# Run analysis for each angle
 # ==============================
-histograms = [read_spe_histogram(f) for f in spe_files]
+for angle, files in spe_files.items():
 
-# ==============================
-# Plot Results
-# ==============================
-fig, axs = plt.subplots(1, 2, figsize=(7, 5))
+    histograms = [rebin(read_spe_histogram(f), factor=2) for f in files]
 
-for i, hist in enumerate(histograms):
-    x = np.arange(len(hist))
+    fig, axs = plt.subplots(1, 2, figsize=(7, 5))
 
-    peaks, y_smooth = fit_and_find_maxima(hist)
+    for i, hist in enumerate(histograms):
 
-    ax = axs.flat[i]
-    ax.bar(x, hist, width=1.0)
+        bins = np.arange(len(hist))
 
-    ax.set_title(spe_files[i])
-    ax.set_xlabel("Bin")
-    ax.set_ylabel("Counts")
-    ax.legend()
+        # Choose correct calibration
+        if i == 0:  # recoil
+            slope = RECOIL_SLOPE
+            intercept = RECOIL_INTERCEPT
+            label = "Recoil"
+        else:       # scatter
+            slope = SCATTER_SLOPE
+            intercept = SCATTER_INTERCEPT
+            label = "Scatter"
 
-plt.tight_layout()
-plt.savefig("Cs137-250-histograms.png", dpi=300)
-plt.close()
+        energy = slope * bins + intercept
+
+        peaks = fit_and_find_maxima(hist)
+        peak_energies = slope * peaks + intercept
+
+        ax = axs[i]
+        ax.bar(energy, hist, width=slope)
+
+        ax.set_title(f"{label} ({angle}°)")
+        ax.set_xlabel("Energy (keV)")
+        ax.set_ylabel("Counts")
+
+        # mark peaks
+        ax.plot(peak_energies, hist[peaks], "ro")
+
+        print(f"{files[i]} peaks at energies (keV): {peak_energies}")
+
+    plt.tight_layout()
+    plt.savefig(f"Cs137-{angle}-histograms.png", dpi=300)
+    plt.close()

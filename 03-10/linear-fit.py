@@ -5,8 +5,8 @@ from scipy.stats import chi2
 # =========================
 # Data
 # =========================
-x_recoil = np.array([1491, 256, 485, 872, 1040])
-x_scatter = np.array([1604, 285, 521, 950, 1121])
+x_recoil = np.array([745, 128, 241, 436, 521])
+x_scatter = np.array([793, 136, 260, 475, 563])
 y = np.array([511, 81, 160, 302, 356])
 
 # Poisson uncertainties (standard for count data)

@@ -9,7 +9,7 @@ from scipy.signal import find_peaks
 SMOOTH_FACTOR = 25      # Increase if too noisy
 MIN_PROMINENCE = 0.05   # Fraction of max height (increase to remove small peaks)
 MIN_DISTANCE = 80       # Minimum bin separation between peaks
-LEFT_IGNORE = 200       # Ignore peaks in the first N bins (to avoid noise)
+LEFT_IGNORE = 100       # Ignore peaks in the first N bins (to avoid noise)
 
 # ==============================
 # List of .Spe files
@@ -43,6 +43,14 @@ def read_spe_histogram(filename):
     return np.array(data)
 
 # ==============================
+# Rebin
+# ==============================
+def rebin(hist, factor=2):
+    n = len(hist) // factor
+    hist = hist[:n * factor]
+    return hist.reshape(n, factor).sum(axis=1)
+
+# ==============================
 # Smooth + Peak Detection
 # ==============================
 def fit_and_find_maxima(hist):
@@ -69,7 +77,7 @@ def fit_and_find_maxima(hist):
 # ==============================
 # Load histograms
 # ==============================
-histograms = [read_spe_histogram(f) for f in spe_files]
+histograms = [rebin(read_spe_histogram(f), factor=2) for f in spe_files]
 
 # ==============================
 # Plot Results
