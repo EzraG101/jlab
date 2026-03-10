@@ -14,10 +14,10 @@ MIN_DISTANCE = 80       # Minimum bin separation between peaks
 # List of .Spe files
 # ==============================
 spe_files = [
-    'Ba133-recoil.Spe',
-    'Ba133-scatter.Spe',
-    'Na22-recoil.Spe',
-    'Na22-scatter.Spe'
+    '03-10-Ba133-recoil.Spe',
+    '03-10-Ba133-scatter.Spe',
+    '03-10-Na22-recoil.Spe',
+    '03-10-Na22-scatter.Spe'
 ]
 
 # ==============================
@@ -88,5 +88,4 @@ for i, hist in enumerate(histograms):
     print(f"{spe_files[i]} peaks at bins: {peaks}")
 
 plt.tight_layout()
-plt.savefig("calibration_peaks.png", dpi=300)
-plt.close()
+plt.show()
