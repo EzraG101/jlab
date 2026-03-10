@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import chi2
+from scipy.stats import chi2, linregress
 
 # =========================
 # Data
@@ -19,22 +19,24 @@ dof = len(y) - 2  # degrees of freedom
 # =========================
 def weighted_linear_fit(x, y, sigma_y):
     weights = 1 / sigma_y**2
-    coeffs = np.polyfit(x, y, 1, w=np.sqrt(weights))
-    m, b = coeffs
+    res = np.polyfit(x, y, 1, w=np.sqrt(weights), cov=True)
+    (m, b), cov = res
+    slope_err = np.sqrt(cov[0,0])
+    intercept_err = np.sqrt(cov[1,1])
 
     y_fit = m * x + b
     chi_squared = np.sum(((y - y_fit) / sigma_y) ** 2)
     reduced_chi_squared = chi_squared / dof
     p_value = 1 - chi2.cdf(chi_squared, dof)
 
-    return m, b, y_fit, chi_squared, reduced_chi_squared, p_value
+    return m, b, slope_err, intercept_err, y_fit, chi_squared, reduced_chi_squared, p_value
 
 # =========================
 # Perform Fits
 # =========================
-m_recoil, b_recoil, yfit_recoil, chi2_recoil, redchi2_recoil, p_recoil = weighted_linear_fit(x_recoil, y, sigma_y)
+m_recoil, b_recoil, slope_err_recoil, intercept_err_recoil, yfit_recoil, chi2_recoil, redchi2_recoil, p_recoil = weighted_linear_fit(x_recoil, y, sigma_y)
 
-m_scatter, b_scatter, yfit_scatter, chi2_scatter, redchi2_scatter, p_scatter = weighted_linear_fit(x_scatter, y, sigma_y)
+m_scatter, b_scatter, slope_err_scatter, intercept_err_scatter, yfit_scatter, chi2_scatter, redchi2_scatter, p_scatter = weighted_linear_fit(x_scatter, y, sigma_y)
 
 # =========================
 # Plot
@@ -60,15 +62,15 @@ plt.close()
 # Print Results
 # =========================
 print("===== RECOIL FIT =====")
-print(f"Slope (m): {m_recoil:.5f}")
-print(f"Intercept (b): {b_recoil:.5f}")
+print(f"Slope (m): {m_recoil:.5f} +- {slope_err_recoil:.5f}")
+print(f"Intercept (b): {b_recoil:.5f} +- {intercept_err_recoil:.5f}")
 print(f"Chi-squared: {chi2_recoil:.3f}")
 print(f"Reduced Chi-squared: {redchi2_recoil:.3f}")
 print(f"Chi-squared probability (p-value): {p_recoil:.5f}")
 
 print("\n===== SCATTER FIT =====")
-print(f"Slope (m): {m_scatter:.5f}")
-print(f"Intercept (b): {b_scatter:.5f}")
+print(f"Slope (m): {m_scatter:.5f} +- {slope_err_scatter:.5f}")
+print(f"Intercept (b): {b_scatter:.5f} +- {intercept_err_scatter:.5f}")
 print(f"Chi-squared: {chi2_scatter:.3f}")
 print(f"Reduced Chi-squared: {redchi2_scatter:.3f}")
 print(f"Chi-squared probability (p-value): {p_scatter:.5f}")

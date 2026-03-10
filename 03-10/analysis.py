@@ -19,6 +19,10 @@ SCATTER_INTERCEPT = -8.21614
 # Files organized by angle
 # ==============================
 spe_files = {
+    205: [
+        "03-10-Cs137-Recoil-205.Spe",
+        "03-10-Cs137-Scatter-205.Spe"
+    ],
     220: [
         "03-10-Cs137-Recoil-220.Spe",
         "03-10-Cs137-Scatter-220.Spe"
