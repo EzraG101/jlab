@@ -9,6 +9,7 @@ from scipy.signal import find_peaks
 SMOOTH_FACTOR = 25      # Increase if too noisy
 MIN_PROMINENCE = 0.05   # Fraction of max height (increase to remove small peaks)
 MIN_DISTANCE = 80       # Minimum bin separation between peaks
+LEFT_IGNORE = 200       # Ignore peaks in the first N bins (to avoid noise)
 
 # ==============================
 # List of .Spe files
@@ -47,16 +48,21 @@ def read_spe_histogram(filename):
 def fit_and_find_maxima(hist):
     x = np.arange(len(hist))
 
-    # Strong smoothing spline
     spline = UnivariateSpline(x, hist, s=SMOOTH_FACTOR * len(hist))
     y_smooth = spline(x)
 
-    # Peak detection with filtering
+    # Only search peaks after LEFT_IGNORE
+    x_search = x[LEFT_IGNORE:]
+    y_search = y_smooth[LEFT_IGNORE:]
+
     peaks, properties = find_peaks(
-        y_smooth,
-        prominence=MIN_PROMINENCE * np.max(y_smooth),
+        y_search,
+        prominence=MIN_PROMINENCE * np.max(y_search),
         distance=MIN_DISTANCE
     )
+
+    # Convert peaks back to original indexing
+    peaks = peaks + LEFT_IGNORE
 
     return peaks, y_smooth
 
@@ -76,9 +82,16 @@ for i, hist in enumerate(histograms):
     peaks, y_smooth = fit_and_find_maxima(hist)
 
     ax = axs.flat[i]
-    ax.bar(x, hist, alpha=0.4, label="Histogram")
-    ax.plot(x, y_smooth, linewidth=2, label="Smoothed Curve")
-    ax.plot(peaks, y_smooth[peaks], "ro", label="Filtered Peaks")
+    ax.bar(x[LEFT_IGNORE:], hist[LEFT_IGNORE:], alpha=0.4, label="Histogram")
+    ax.plot(x[LEFT_IGNORE:], y_smooth[LEFT_IGNORE:], linewidth=2, label="Smoothed Curve")
+
+    # only show peaks that are in the visible region
+    visible_peaks = peaks[peaks >= LEFT_IGNORE]
+    ax.plot(visible_peaks, y_smooth[visible_peaks], "ro", label="Filtered Peaks")
+
+    ax.set_xlim(LEFT_IGNORE, len(hist))
+
+    ax.axvspan(0, LEFT_IGNORE, color='gray', alpha=0.2)
 
     ax.set_title(spe_files[i])
     ax.set_xlabel("Bin")
@@ -88,4 +101,5 @@ for i, hist in enumerate(histograms):
     print(f"{spe_files[i]} peaks at bins: {peaks}")
 
 plt.tight_layout()
-plt.show()
+plt.savefig("calibration_peaks.png", dpi=300)
+plt.close()
