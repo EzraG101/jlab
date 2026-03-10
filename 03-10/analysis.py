@@ -23,9 +23,21 @@ spe_files = {
         "03-10-Cs137-Recoil-205.Spe",
         "03-10-Cs137-Scatter-205.Spe"
     ],
+    210: [
+        "03-10-Cs137-Recoil-210.Spe",
+        "03-10-Cs137-Scatter-210.Spe"
+    ],
+    215: [
+        "03-10-Cs137-Recoil-215.Spe",
+        "03-10-Cs137-Scatter-215.Spe"
+    ],
     220: [
         "03-10-Cs137-Recoil-220.Spe",
         "03-10-Cs137-Scatter-220.Spe"
+    ],
+    225: [
+        "03-10-Cs137-Recoil-225.Spe",
+        "03-10-Cs137-Scatter-225.Spe"
     ],
     250: [
         "03-10-Cs137-Recoil-250.Spe",
