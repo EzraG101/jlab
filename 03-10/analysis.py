@@ -12,10 +12,10 @@ SMOOTH_FACTOR = 120
 MIN_PROMINENCE = 0.05
 MIN_DISTANCE = 80
 
-RECOIL_SLOPE = 0.70107
-RECOIL_INTERCEPT = -8.40091
-SCATTER_SLOPE = 0.65156
-SCATTER_INTERCEPT = -8.21614
+RECOIL_SLOPE = 0.70457
+RECOIL_INTERCEPT = -10.68206
+SCATTER_SLOPE = 0.65061
+SCATTER_INTERCEPT = -8.25998
 
 # ==============================
 # Files organized by angle
@@ -337,3 +337,108 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig("energy_sum_vs_angle.png", dpi=300)
 plt.close()
+
+import os
+
+# Make folder for secondary peak fits
+os.makedirs("secondary_peak_fits", exist_ok=True)
+
+secondary_peak_energies = []
+
+for angle, files in spe_files.items():
+
+    # Only look at recoil histogram
+    recoil_file = files[0]
+    hist = rebin(read_spe_histogram(recoil_file), factor=2)
+
+    # Use calibration
+    slope = RECOIL_SLOPE
+    intercept = RECOIL_INTERCEPT
+
+    # Approximate channel for ~660 keV
+    approx_bin = int((660 - intercept) / slope)
+    window = 40  # you can adjust
+
+    # Define zoom region
+    left = max(approx_bin - window, 0)
+    right = min(approx_bin + window, len(hist))
+
+    # Extract counts in this region
+    x = np.arange(left, right)
+    y = hist[left:right]
+
+    # Poisson uncertainties
+    sigma = np.sqrt(y)
+    sigma[sigma < 1] = 1
+
+    # Initial guesses
+    A0 = np.max(y)
+    mu0 = approx_bin
+    sigma0 = window / 3
+    m0 = 0
+    b0 = np.min(y)
+    p0 = [A0, mu0, sigma0, m0, b0]
+
+    # Bounds
+    lower_bounds = [0, left, 1, -np.inf, -np.inf]
+    upper_bounds = [np.inf, right, window, np.inf, np.inf]
+
+    # Fit
+    try:
+        popt, pcov = curve_fit(
+            gaussian_linear,
+            x,
+            y,
+            p0=p0,
+            sigma=sigma,
+            absolute_sigma=True,
+            bounds=(lower_bounds, upper_bounds),
+            maxfev=10000
+        )
+    except RuntimeError:
+        popt = p0
+
+    mu = popt[1]
+    peak_energy = slope * mu + intercept
+    secondary_peak_energies.append(peak_energy)
+
+    # Chi^2 (optional, for diagnostics)
+    model = gaussian_linear(x, *popt)
+    chi2_val = np.sum(((y - model)/sigma)**2)
+    ndof = len(y) - len(popt)
+    chi2_prob = chi2.sf(chi2_val, ndof)
+
+    # ===========================
+    # Plot zoomed fit
+    # ===========================
+    plt.figure(figsize=(5,4))
+    energy_zoom = slope * x + intercept
+    plt.bar(energy_zoom, y, width=slope, color="royalblue", label="Recoil histogram")
+    xfit = np.linspace(left, right, 400)
+    yfit = gaussian_linear(xfit, *popt)
+    plt.plot(slope*xfit + intercept, yfit, color="crimson", linewidth=2, label="Gaussian+linear fit")
+    plt.axvline(peak_energy, color="darkgreen", linestyle="--", label=f"Peak = {peak_energy:.1f} keV")
+    plt.xlabel("Energy (keV)")
+    plt.ylabel("Counts")
+    plt.title(f"Recoil Secondary Peak Fit ({angle}°)")
+    plt.legend()
+    plt.text(
+        0.05,
+        0.95,
+        f"$\\chi^2$ = {chi2_val:.1f}\n"
+        f"dof = {ndof}\n"
+        f"$P(\\chi^2)$ = {chi2_prob:.3f}",
+        transform=plt.gca().transAxes,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+    )
+
+    plt.tight_layout()
+    plt.savefig(f"secondary_peak_fits/Recoil_{angle}_secondary_peak.png", dpi=300)
+    plt.close()
+
+# ===========================
+# Print average secondary peak energy
+# ===========================
+avg_secondary_peak = np.mean(secondary_peak_energies)
+print(f"Average secondary peak energy (keV) = {avg_secondary_peak:.2f}")
