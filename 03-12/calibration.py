@@ -8,8 +8,8 @@ from scipy.signal import find_peaks
 # ==============================
 SMOOTH_FACTOR = 25      # Increase if too noisy
 MIN_PROMINENCE = 0.05   # Fraction of max height (increase to remove small peaks)
-MIN_DISTANCE = 80       # Minimum bin separation between peaks
-LEFT_IGNORE = 0       # Ignore peaks in the first N bins (to avoid noise)
+MIN_DISTANCE = 40       # Minimum bin separation between peaks
+LEFT_IGNORE = 100       # Ignore peaks in the first N bins (to avoid noise)
 
 # ==============================
 # List of .Spe files
