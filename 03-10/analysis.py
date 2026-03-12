@@ -113,7 +113,7 @@ def fit_peak(hist, window=40):
 
     uncertainties = np.sqrt(y)
 
-    popt, pcov = curve_fit(gaussian_linear, x, y, p0=p0, sigma=uncertainties, absolute_sigma=True)
+    popt, pcov = curve_fit(gaussian_linear, x, y, p0=p0, sigma=uncertainties, absolute_sigma=True, maxfev=10000)
 
     A, mu, sigma, m, b = popt
 
@@ -317,6 +317,15 @@ plt.axhline(
     linestyle="--",
     label="Expected (662 keV)"
 )
+
+plt.axhline(
+    np.mean(energy_sums),
+    color="blue",
+    linestyle="--",
+    label="Mean Energy Sum"
+)
+
+print(f"Mean energy sum (keV): {np.mean(energy_sums):.1f}")
 
 plt.xlabel("Scattering Angle (degrees)")
 plt.ylabel("Scatter + Recoil Energy (keV)")
