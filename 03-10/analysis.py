@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import UnivariateSpline
 from scipy.signal import find_peaks
+from scipy.optimize import curve_fit
+from scipy.stats import chi2
 
 # ==============================
 # Adjustable Parameters
@@ -81,50 +83,248 @@ def rebin(hist, factor=2):
 # ==============================
 # Smooth + Peak Detection
 # ==============================
-def fit_and_find_maxima(hist):
-    max_bin = np.argmax(hist)      # bin of absolute maximum
-    return np.array([max_bin])
+def gaussian_linear(x, A, mu, sigma, m, b):
+    return A * np.exp(-(x - mu)**2 / (2 * sigma**2)) + (m*x + b)
+
+# def fit_and_find_maxima(hist):
+#     max_bin = np.argmax(hist)      # bin of absolute maximum
+#     return np.array([max_bin])
+
+def fit_peak(hist, window=40):
+
+    bins = np.arange(len(hist))
+    max_bin = np.argmax(hist)
+
+    # define fitting region
+    left = max(max_bin - window, 0)
+    right = min(max_bin + window, len(hist))
+
+    x = bins[left:right]
+    y = hist[left:right]
+
+    # initial parameter guesses
+    A0 = hist[max_bin]
+    mu0 = max_bin
+    sigma0 = window / 3
+    m0 = 0
+    b0 = np.min(y)
+
+    p0 = [A0, mu0, sigma0, m0, b0]
+
+    uncertainties = np.sqrt(y)
+
+    popt, pcov = curve_fit(gaussian_linear, x, y, p0=p0, sigma=uncertainties, absolute_sigma=True)
+
+    A, mu, sigma, m, b = popt
+
+    return mu, popt, (left, right)
 
 # ==============================
 # Run analysis for each angle
 # ==============================
+angles = []
+energy_sums = []
+
 for angle, files in spe_files.items():
 
     histograms = [rebin(read_spe_histogram(f), factor=2) for f in files]
 
-    fig, axs = plt.subplots(1, 2, figsize=(7, 5))
+    # ==========================================
+    # Figure 1 : Full histograms
+    # ==========================================
+    fig_full, axs_full = plt.subplots(1, 2, figsize=(9,5))
+
+    # ==========================================
+    # Figure 2 : Zoomed peak fits
+    # ==========================================
+    fig_zoom, axs_zoom = plt.subplots(1, 2, figsize=(9,5))
 
     for i, hist in enumerate(histograms):
 
         bins = np.arange(len(hist))
 
-        # Choose correct calibration
-        if i == 0:  # recoil
+        # -------------------------
+        # Calibration
+        # -------------------------
+        if i == 0:
             slope = RECOIL_SLOPE
             intercept = RECOIL_INTERCEPT
             label = "Recoil"
-        else:       # scatter
+        else:
             slope = SCATTER_SLOPE
             intercept = SCATTER_INTERCEPT
             label = "Scatter"
 
         energy = slope * bins + intercept
 
-        peaks = fit_and_find_maxima(hist)
-        peak_energies = slope * peaks + intercept
+        # -------------------------
+        # Peak fit
+        # -------------------------
+        mu, popt, (left, right) = fit_peak(hist)
+        peak_energy = slope * mu + intercept
 
-        ax = axs[i]
-        ax.bar(energy, hist, width=slope)
+        if i == 0:
+            recoil_energy = peak_energy
+        else:
+            scatter_energy = peak_energy
+
+        # ==========================================
+        # Chi^2 calculation
+        # ==========================================
+        x = np.arange(left, right)
+        y = hist[left:right]
+
+        model = gaussian_linear(x, *popt)
+
+        # Poisson uncertainties
+        sigma = np.sqrt(y)
+        sigma[sigma == 0] = 1
+
+        chi2_val = np.sum(((y - model) / sigma)**2)
+
+        ndof = len(y) - len(popt)
+
+        chi2_prob = chi2.sf(chi2_val, ndof)
+
+        print(f"{files[i]} peak energy (keV): {peak_energy:.2f}")
+
+        # =====================================================
+        # FULL HISTOGRAM PLOT
+        # =====================================================
+        ax = axs_full[i]
+
+        ax.bar(
+            energy,
+            hist,
+            width=slope,
+            color="royalblue",
+            label="Histogram"
+        )
+
+        max_bin = np.argmax(hist)
+
+        ax.plot(
+            slope*max_bin + intercept,
+            hist[max_bin],
+            "o",
+            color="darkgreen",
+            label="Maximum bin"
+        )
+
+        ax.axvspan(
+            slope*left + intercept,
+            slope*right + intercept,
+            color="gold",
+            alpha=0.3,
+            label="Fit region"
+        )
 
         ax.set_title(f"{label} ({angle}°)")
         ax.set_xlabel("Energy (keV)")
         ax.set_ylabel("Counts")
 
-        # mark peaks
-        ax.plot(peak_energies, hist[peaks], "ro")
+        ax.legend()
 
-        print(f"{files[i]} peaks at energies (keV): {peak_energies}")
+        # =====================================================
+        # ZOOMED FIT PLOT
+        # =====================================================
+        ax2 = axs_zoom[i]
 
+        x = np.arange(left, right)
+        y = hist[left:right]
+
+        energy_zoom = slope * x + intercept
+
+        ax2.bar(
+            energy_zoom,
+            y,
+            width=slope,
+            color="royalblue",
+            label="Measured histogram"
+        )
+
+        # fitted curve
+        xfit = np.linspace(left, right, 400)
+        yfit = gaussian_linear(xfit, *popt)
+
+        ax2.plot(
+            slope*xfit + intercept,
+            yfit,
+            color="crimson",
+            linewidth=2,
+            label="Gaussian + linear fit"
+        )
+
+        ax2.axvline(
+            peak_energy,
+            color="darkgreen",
+            linestyle="--",
+            linewidth=2,
+            label=f"Peak = {peak_energy:.1f} keV"
+        )
+
+        ax2.set_title(f"{label} Peak Fit ({angle}°)")
+        ax2.set_xlabel("Energy (keV)")
+        ax2.set_ylabel("Counts")
+
+        ax2.legend()
+
+        ax2.text(
+            0.05,
+            0.95,
+            f"$\\chi^2$ = {chi2_val:.1f}\n"
+            f"dof = {ndof}\n"
+            f"$P(\\chi^2)$ = {chi2_prob:.3f}",
+            transform=ax2.transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+        )
+
+    # ==========================================
+    # Save figures
+    # ==========================================
+    plt.figure(fig_full.number)
     plt.tight_layout()
     plt.savefig(f"Cs137-{angle}-histograms.png", dpi=300)
-    plt.close()
+    plt.close(fig_full)
+
+    plt.figure(fig_zoom.number)
+    plt.tight_layout()
+    plt.savefig(f"Cs137-{angle}-peakfits.png", dpi=300)
+    plt.close(fig_zoom)
+
+    # store sum after both recoil and scatter processed
+    if angle != 310:
+        angles.append(angle)
+        energy_sums.append(recoil_energy + scatter_energy)
+
+angles = np.array(angles)
+energy_sums = np.array(energy_sums)
+
+plt.figure(figsize=(6,5))
+
+plt.scatter(
+    angles,
+    energy_sums,
+    color="royalblue",
+    s=60,
+    label="Measured sums"
+)
+
+plt.axhline(
+    662,
+    color="crimson",
+    linestyle="--",
+    label="Expected (662 keV)"
+)
+
+plt.xlabel("Scattering Angle (degrees)")
+plt.ylabel("Scatter + Recoil Energy (keV)")
+plt.title("Energy Conservation Check")
+
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.savefig("energy_sum_vs_angle.png", dpi=300)
+plt.close()
