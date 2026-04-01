@@ -3,6 +3,7 @@ import re
 import math
 import glob
 import json
+import copy
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
 from scipy.stats import chi2
+from scipy.odr import ODR, Model, RealData
 
 # ============================================================
 # Plot style
@@ -37,12 +39,19 @@ CBLACK = "#000000"
 CGRAY = "#7F7F7F"
 
 # ============================================================
+# Physics constants
+# ============================================================
+
+CS137_ENERGY_KEV = 661.657
+ELECTRON_REST_ENERGY_KEV = 510.99895
+
+# ============================================================
 # User-configurable known source energies (keV)
 # ============================================================
 
 KNOWN_PEAKS_KEV = {
-    "Na22": np.array([511.0]),
-    "Ba133": np.array([81.0, 302.85, 356.01]),
+    "Na22": np.array([511.0, 1274.537]),
+    "Ba133": np.array([81.0, 276.4, 302.85, 356.01, 383.85]),
     "Cs137": np.array([661.657]),
 }
 
@@ -55,13 +64,17 @@ LOW_BIN_CUTOFFS = {
     ("03-10", "Na22", "scatter"): 80,
 }
 
-def get_low_bin_cutoff(
-    date: str,
-    source: str,
-    spec_type: str,
-    angle: Optional[float] = None
-) -> int:
-    return LOW_BIN_CUTOFFS.get((date, source, spec_type), 0)
+# ============================================================
+# Systematic-study configuration
+# ============================================================
+
+SYSTEMATIC_CONFIG = {
+    "enabled": True,
+    "fit_half_width_values": [10, 12, 14],
+    "p_value_cut_values": [0.05],
+    "low_bin_cut_shifts": [-10, 0, 10],
+    "cs_peak_rules": ["closest_to_max", "highest_count"],
+}
 
 # ============================================================
 # Data containers
@@ -137,46 +150,79 @@ def sanitize_filename(s: str) -> str:
 def poisson_errors(counts: np.ndarray):
     return np.sqrt(np.maximum(counts, 1.0))
 
+def get_low_bin_cutoff(
+    date: str,
+    source: str,
+    spec_type: str,
+    angle: Optional[float] = None,
+    low_bin_cutoffs: Optional[Dict[Tuple[str, str, str], int]] = None
+) -> int:
+    if low_bin_cutoffs is None:
+        low_bin_cutoffs = LOW_BIN_CUTOFFS
+    return low_bin_cutoffs.get((date, source, spec_type), 0)
+
+def mean_with_propagated_uncertainty(values, errors):
+    values = np.asarray(values, dtype=float)
+    errors = np.asarray(errors, dtype=float)
+    N = len(values)
+    if N == 0:
+        return np.nan, np.nan
+    return np.mean(values), np.sqrt(np.sum(errors**2)) / N
+
+def sample_sem(values):
+    values = np.asarray(values, dtype=float)
+    if len(values) < 2:
+        return np.nan
+    return np.std(values, ddof=1) / np.sqrt(len(values))
+
+def systematic_uncertainty_from_variations(values):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) < 2:
+        return np.nan
+    return np.std(values, ddof=1)
+
+def combine_stat_and_sys(stat_err, sys_err):
+    if not np.isfinite(stat_err) and not np.isfinite(sys_err):
+        return np.nan
+    if not np.isfinite(stat_err):
+        return sys_err
+    if not np.isfinite(sys_err):
+        return stat_err
+    return np.sqrt(stat_err**2 + sys_err**2)
+
+def inverse_with_error(x, xerr):
+    y = 1.0 / x
+    yerr = np.abs(xerr / (x**2))
+    return y, yerr
+
+def one_minus_cos_theta(theta_deg):
+    return 1.0 - np.cos(np.deg2rad(theta_deg))
+
+def inv_one_minus_cos_theta(theta_deg):
+    x = one_minus_cos_theta(theta_deg)
+    return 1.0 / x
+
 # ============================================================
 # File reading and parsing
 # ============================================================
 
 def parse_spe_filename(filename: str):
-    """
-    Expected formats:
-      mm-dd-Na22-scatter.Spe
-      mm-dd-Ba133-recoil.Spe
-      mm-dd-Cs137-scatter-30.Spe
-    """
     base = os.path.basename(filename)
     pattern_no_angle = r"^(?P<date>\d{2}-\d{2})-(?P<source>Na22|Ba133|Cs137)-(?P<stype>scatter|recoil)\.Spe$"
     pattern_angle = r"^(?P<date>\d{2}-\d{2})-(?P<source>Na22|Ba133|Cs137)-(?P<stype>scatter|recoil)-(?P<angle>-?\d+(\.\d+)?)\.Spe$"
 
     m = re.match(pattern_angle, base, re.IGNORECASE)
     if m:
-        return (
-            m.group("date"),
-            m.group("source"),
-            m.group("stype").lower(),
-            float(m.group("angle"))
-        )
+        return m.group("date"), m.group("source"), m.group("stype").lower(), float(m.group("angle"))
 
     m = re.match(pattern_no_angle, base, re.IGNORECASE)
     if m:
-        return (
-            m.group("date"),
-            m.group("source"),
-            m.group("stype").lower(),
-            None
-        )
+        return m.group("date"), m.group("source"), m.group("stype").lower(), None
 
     raise ValueError(f"Filename does not match expected format: {filename}")
 
 def read_spe_file(filepath: str) -> np.ndarray:
-    """
-    Reads counts from a common ORTEC-style .Spe file.
-    Assumes counts live between '$DATA:' and the next section beginning with '$'.
-    """
     with open(filepath, "r", encoding="latin-1") as f:
         lines = [line.strip() for line in f.readlines()]
 
@@ -198,7 +244,6 @@ def read_spe_file(filepath: str) -> np.ndarray:
             continue
 
         parts = line.split()
-
         if len(parts) == 2 and not started_numbers:
             try:
                 int(parts[0]); int(parts[1])
@@ -207,8 +252,7 @@ def read_spe_file(filepath: str) -> np.ndarray:
                 pass
 
         try:
-            val = float(parts[0])
-            counts.append(val)
+            counts.append(float(parts[0]))
             started_numbers = True
         except Exception:
             continue
@@ -235,10 +279,7 @@ def load_all_spectra(data_dir: str) -> List[Spectrum]:
         elif len(counts_raw) == 1024:
             counts = counts_raw.copy()
         else:
-            raise ValueError(
-                f"Unexpected number of channels in {filepath}: {len(counts_raw)}. "
-                "Expected 2048 or 1024."
-            )
+            raise ValueError(f"Unexpected number of channels in {filepath}: {len(counts_raw)}")
 
         bins = np.arange(len(counts), dtype=float)
 
@@ -257,7 +298,7 @@ def load_all_spectra(data_dir: str) -> List[Spectrum]:
     return spectra
 
 # ============================================================
-# Models and fit utilities
+# Models and fitting
 # ============================================================
 
 def gaussian_plus_linear(x, A, mu, sigma, b0, b1):
@@ -273,10 +314,23 @@ def compute_chi2(y, yfit, yerr, n_params):
 def weighted_linear(x, m, b):
     return m * x + b
 
-def fit_weighted_linear(x, y, yerr):
-    popt, pcov = curve_fit(weighted_linear, x, y, sigma=yerr, absolute_sigma=True)
+def fit_linear_odr(x, y, sx):
+    def f_odr(beta, x_):
+        return beta[0] * x_ + beta[1]
+
+    model = Model(f_odr)
+    data = RealData(x, y, sx=sx)
+    beta0 = np.polyfit(x, y, 1)
+
+    odr = ODR(data, model, beta0=beta0)
+    out = odr.run()
+
+    popt = np.array(out.beta, dtype=float)
+    pcov = np.array(out.cov_beta, dtype=float) * out.res_var
+
     yfit = weighted_linear(x, *popt)
-    chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr, 2)
+    yerr_eff = np.maximum(np.abs(popt[0]) * sx, 1e-12)
+    chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr_eff, 2)
     return popt, pcov, chi2_val, ndof, p_value
 
 # ============================================================
@@ -292,21 +346,12 @@ def find_and_fit_peaks(
     height: Optional[float] = None,
     distance: int = 20,
     fit_half_width: int = 12,
-    max_peaks: int = 5,
-    source_hint: Optional[str] = None,
+    max_peaks: int = 10,
     min_bin: int = 0,
     calibration: Optional[CalibrationResult] = None,
     min_p_value: float = 0.05,
+    save_plots: bool = True,
 ):
-    """
-    Find candidate peaks, fit each with Gaussian + linear background,
-    and generate diagnostic plots.
-
-    If calibration is provided, plots use energy [keV] on the x-axis.
-    Fits are still performed in bin space.
-
-    Peaks with chi2 probability below min_p_value are rejected.
-    """
     os.makedirs(output_dir, exist_ok=True)
 
     mask = bins >= min_bin
@@ -336,47 +381,37 @@ def find_and_fit_peaks(
     )
 
     if len(peak_indices_local) > max_peaks:
-        prominences = properties["prominences"]
-        order = np.argsort(prominences)[::-1][:max_peaks]
-        peak_indices_local = peak_indices_local[order]
-        peak_indices_local = np.sort(peak_indices_local)
+        order = np.argsort(properties["prominences"])[::-1][:max_peaks]
+        peak_indices_local = np.sort(peak_indices_local[order])
 
-    # Candidate overview plot
-    fig, ax = plt.subplots()
-    bar_width = np.diff(xplot_use).mean() if len(xplot_use) > 1 else 1.0
-    ax.bar(xplot_use, counts_use, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0)
+    if save_plots:
+        fig, ax = plt.subplots()
+        bar_width = np.diff(xplot_use).mean() if len(xplot_use) > 1 else 1.0
+        ax.bar(xplot_use, counts_use, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0)
 
-    if len(peak_indices_local) > 0:
-        ax.plot(
-            xplot_use[peak_indices_local],
-            counts_use[peak_indices_local],
-            'o',
-            color=CRED,
-            markersize=8,
-            label="Peak candidates"
-        )
+        if len(peak_indices_local) > 0:
+            ax.plot(xplot_use[peak_indices_local], counts_use[peak_indices_local], 'o',
+                    color=CRED, markersize=8, label="Peak candidates")
+            for p in peak_indices_local:
+                left = max(0, p - fit_half_width)
+                right = min(len(bins_use) - 1, p + fit_half_width)
+                ax.axvspan(xplot_use[left], xplot_use[right], color=CORANGE, alpha=0.15)
 
-        for p in peak_indices_local:
-            left = max(0, p - fit_half_width)
-            right = min(len(bins_use) - 1, p + fit_half_width)
-            ax.axvspan(xplot_use[left], xplot_use[right], color=CORANGE, alpha=0.15)
+        if min_bin > 0:
+            ax.text(
+                0.02, 0.95, f"Low-bin cutoff applied: bin ≥ {min_bin}",
+                transform=ax.transAxes, ha="left", va="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+            )
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Counts")
-    ax.set_title(f"{title_prefix} Peak candidates")
-    if min_bin > 0:
-        ax.text(
-            0.02, 0.95,
-            f"Low-bin cutoff applied: bin ≥ {min_bin}",
-            transform=ax.transAxes,
-            ha="left", va="top",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
-        )
-    if len(peak_indices_local) > 0:
-        ax.legend(loc="best")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_peak_candidates.png"), dpi=200)
-    plt.close(fig)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Counts")
+        ax.set_title(f"{title_prefix} Peak candidates")
+        if len(peak_indices_local) > 0:
+            ax.legend(loc="best")
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_peak_candidates.png"), dpi=200)
+        plt.close(fig)
 
     fit_results = []
 
@@ -388,10 +423,7 @@ def find_and_fit_peaks(
         yfit = counts_use[left:right+1]
         yerr = poisson_errors(yfit)
 
-        if calibration is not None:
-            xfit_plot = calibration.slope * xfit + calibration.intercept
-        else:
-            xfit_plot = xfit
+        xfit_plot = calibration.slope * xfit + calibration.intercept if calibration is not None else xfit
 
         A0 = max(yfit) - np.median(yfit)
         mu0 = bins_use[p]
@@ -450,102 +482,91 @@ def find_and_fit_peaks(
         )
         fit_results.append(result)
 
-        fig, ax = plt.subplots()
-        bar_width = np.diff(xfit_plot).mean() if len(xfit_plot) > 1 else 1.0
-        ax.bar(xfit_plot, yfit, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0, label="Data")
+        if save_plots:
+            fig, ax = plt.subplots()
+            bar_width = np.diff(xfit_plot).mean() if len(xfit_plot) > 1 else 1.0
+            ax.bar(xfit_plot, yfit, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0, label="Data")
 
-        if np.all(np.isfinite(popt)):
-            xdense = np.linspace(xfit.min(), xfit.max(), 400)
-            ydense = gaussian_plus_linear(xdense, *popt)
+            if np.all(np.isfinite(popt)):
+                xdense = np.linspace(xfit.min(), xfit.max(), 400)
+                ydense = gaussian_plus_linear(xdense, *popt)
 
-            if calibration is not None:
-                xdense_plot = calibration.slope * xdense + calibration.intercept
-                peak_plot = calibration.slope * popt[1] + calibration.intercept
-                peak_plot_err = abs(calibration.slope) * perr[1]
-                unit = "keV"
+                if calibration is not None:
+                    xdense_plot = calibration.slope * xdense + calibration.intercept
+                    peak_plot = calibration.slope * popt[1] + calibration.intercept
+                    peak_plot_err = abs(calibration.slope) * perr[1]
+                    unit = "keV"
+                else:
+                    xdense_plot = xdense
+                    peak_plot = popt[1]
+                    peak_plot_err = perr[1]
+                    unit = "bins"
+
+                ax.plot(xdense_plot, ydense, color=CRED, lw=2.5, label="Gaussian + linear fit")
+                ax.axvline(peak_plot, color=CGREEN, ls="--", lw=2,
+                           label=f"Peak = {peak_plot:.2f} ± {peak_plot_err:.2f} {unit}")
+
+                status = "accepted" if success else "rejected"
+                if rejected_for_p:
+                    status += f" ($p<{min_p_value}$)"
+
+                textbox = (
+                    f"$\\mu$ = {peak_plot:.2f} ± {peak_plot_err:.2f} {unit}\n"
+                    f"$\\sigma$ = {popt[2]:.2f} ± {perr[2]:.2f} bins\n"
+                    f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+                    f"$p$ = {p_value:.3f}\n"
+                    f"{status}"
+                )
+                ax.text(
+                    0.98, 0.95, textbox, transform=ax.transAxes,
+                    ha="right", va="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+                )
             else:
-                xdense_plot = xdense
-                peak_plot = popt[1]
-                peak_plot_err = perr[1]
-                unit = "bins"
+                ax.text(
+                    0.98, 0.95, "Fit failed", transform=ax.transAxes,
+                    ha="right", va="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+                )
 
-            ax.plot(xdense_plot, ydense, color=CRED, lw=2.5, label="Gaussian + linear fit")
-            ax.axvline(peak_plot, color=CGREEN, ls="--", lw=2,
-                       label=f"Peak = {peak_plot:.2f} ± {peak_plot_err:.2f} {unit}")
+            ax.set_xlabel("Energy [keV]" if calibration is not None else "Bin")
+            ax.set_ylabel("Counts")
+            ax.set_title(f"{title_prefix} candidate {i+1} local fit")
+            ax.legend(loc="best")
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_candidate_{i+1}_fit.png"), dpi=200)
+            plt.close(fig)
 
-            status = "accepted" if success else "rejected"
-            if rejected_for_p:
-                status += f" ($p<{min_p_value}$)"
+    if save_plots:
+        fig, ax = plt.subplots()
+        bar_width = np.diff(xplot_use).mean() if len(xplot_use) > 1 else 1.0
+        ax.bar(xplot_use, counts_use, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0, label="Histogram")
 
-            textbox = (
-                f"$\\mu$ = {peak_plot:.2f} ± {peak_plot_err:.2f} {unit}\n"
-                f"$\\sigma$ = {popt[2]:.2f} ± {perr[2]:.2f} bins\n"
-                f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
-                f"$p$ = {p_value:.3f}\n"
-                f"{status}"
-            )
+        valid_results = sorted([r for r in fit_results if r.success], key=lambda r: r.fit_center)
+        for i, r in enumerate(valid_results):
+            xpeak = calibration.slope * r.fit_center + calibration.intercept if calibration is not None else r.fit_center
+            yval = np.interp(r.fit_center, bins_use, counts_use)
+            ax.axvline(xpeak, color=CRED, lw=2)
+            ax.plot(xpeak, yval, 'o', color=CRED, markersize=8)
             ax.text(
-                0.98, 0.95, textbox, transform=ax.transAxes,
-                ha="right", va="top",
+                xpeak, yval + 0.03 * np.max(counts_use), f"{i}",
+                color=CBLACK, ha="center", va="bottom", fontsize=13,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none")
+            )
+
+        if min_bin > 0:
+            ax.text(
+                0.02, 0.95, f"Low-bin cutoff applied: bin ≥ {min_bin}",
+                transform=ax.transAxes, ha="left", va="top",
                 bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
             )
-        else:
-            ax.text(
-                0.98, 0.95, "Fit failed", transform=ax.transAxes,
-                ha="right", va="top",
-                bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
-            )
 
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel("Energy [keV]" if calibration is not None else "Bin")
         ax.set_ylabel("Counts")
-        ax.set_title(f"{title_prefix} candidate {i+1} local fit")
-        ax.legend(loc="best")
+        ax.set_title(f"{title_prefix} fitted peaks")
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_candidate_{i+1}_fit.png"), dpi=200)
+        plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_fitted_peaks.png"), dpi=200)
         plt.close(fig)
-
-    # Final fitted-peaks plot
-    fig, ax = plt.subplots()
-    bar_width = np.diff(xplot_use).mean() if len(xplot_use) > 1 else 1.0
-    ax.bar(xplot_use, counts_use, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0, label="Histogram")
-
-    valid_results = [r for r in fit_results if r.success]
-    valid_results = sorted(valid_results, key=lambda r: r.fit_center)
-    for i, r in enumerate(valid_results):
-        if calibration is not None:
-            xpeak = calibration.slope * r.fit_center + calibration.intercept
-        else:
-            xpeak = r.fit_center
-
-        yval = np.interp(r.fit_center, bins_use, counts_use)
-        ax.axvline(xpeak, color=CRED, lw=2)
-        ax.plot(xpeak, yval, 'o', color=CRED, markersize=8)
-        ax.text(
-            xpeak,
-            yval + 0.03 * np.max(counts_use),
-            f"{i}",
-            color=CBLACK,
-            ha="center",
-            va="bottom",
-            fontsize=13,
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none")
-        )
-
-    if min_bin > 0:
-        ax.text(
-            0.02, 0.95,
-            f"Low-bin cutoff applied: bin ≥ {min_bin}",
-            transform=ax.transAxes,
-            ha="left", va="top",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
-        )
-
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Counts")
-    ax.set_title(f"{title_prefix} fitted peaks")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_fitted_peaks.png"), dpi=200)
-    plt.close(fig)
 
     return fit_results
 
@@ -553,13 +574,8 @@ def find_and_fit_peaks(
 # Manual matching for calibration peaks
 # ============================================================
 
-def manual_match_calibration_peaks(
-    source: str,
-    fit_results: List[PeakFitResult],
-    known_energies: np.ndarray
-):
-    valid = [r for r in fit_results if r.success]
-    valid = sorted(valid, key=lambda r: r.fit_center)
+def manual_match_calibration_peaks(source, fit_results, known_energies):
+    valid = sorted([r for r in fit_results if r.success], key=lambda r: r.fit_center)
 
     if len(valid) == 0:
         raise ValueError(f"No successful fitted peaks available for {source}")
@@ -583,12 +599,11 @@ def manual_match_calibration_peaks(
 
     print("\nEnter matches as:")
     print("    peak_index energy_index")
-    print("one per line. Press Enter on a blank line when done.")
+    print("one per line. Press Enter on blank line when done.")
 
     selected_peak_bins = []
     selected_peak_bin_errs = []
     selected_energies = []
-
     used_peak_indices = set()
     used_energy_indices = set()
 
@@ -624,15 +639,13 @@ def manual_match_calibration_peaks(
 
         used_peak_indices.add(pidx)
         used_energy_indices.add(eidx)
-
         selected_peak_bins.append(valid[pidx].fit_center)
         selected_peak_bin_errs.append(valid[pidx].fit_center_err)
         selected_energies.append(float(known_energies[eidx]))
 
         print(
-            f"Accepted: peak {pidx} -> "
-            f"{valid[pidx].fit_center:.2f} ± {valid[pidx].fit_center_err:.2f} bins "
-            f"matched to {known_energies[eidx]:.3f} keV"
+            f"Accepted: peak {pidx} -> {valid[pidx].fit_center:.2f} ± "
+            f"{valid[pidx].fit_center_err:.2f} bins matched to {known_energies[eidx]:.3f} keV"
         )
 
     if len(selected_peak_bins) < 1:
@@ -641,7 +654,6 @@ def manual_match_calibration_peaks(
     peak_bins = np.array(selected_peak_bins, dtype=float)
     peak_bin_errs = np.array(selected_peak_bin_errs, dtype=float)
     energies = np.array(selected_energies, dtype=float)
-
     order = np.argsort(peak_bins)
     return peak_bins[order], peak_bin_errs[order], energies[order]
 
@@ -651,48 +663,35 @@ def save_manual_matches(match_file, key, peak_bins, peak_bin_errs, energies):
             data = json.load(f)
     else:
         data = {}
-
     data[key] = {
         "peak_bins": np.asarray(peak_bins, dtype=float).tolist(),
         "peak_bin_errs": np.asarray(peak_bin_errs, dtype=float).tolist(),
         "energies": np.asarray(energies, dtype=float).tolist(),
     }
-
     with open(match_file, "w") as f:
         json.dump(data, f, indent=2)
 
 def load_manual_matches(match_file, key):
     if not os.path.exists(match_file):
         raise FileNotFoundError(f"Manual match file not found: {match_file}")
-
     with open(match_file, "r") as f:
         data = json.load(f)
-
     if key not in data:
         raise KeyError(f"No saved manual matches found for key: {key}")
 
     entry = data[key]
-
     peak_bins = np.array(entry["peak_bins"], dtype=float)
     peak_bin_errs = np.array(entry["peak_bin_errs"], dtype=float)
     energies = np.array(entry["energies"], dtype=float)
 
     if not (len(peak_bins) == len(peak_bin_errs) == len(energies)):
         raise ValueError(f"Saved match data for {key} has inconsistent array lengths")
-
     if len(peak_bins) < 1:
         raise ValueError(f"Saved match data for {key} has fewer than 1 matched peak")
 
     return peak_bins, peak_bin_errs, energies
 
-def get_manual_matches(
-    match_file,
-    key,
-    source,
-    fit_results,
-    known_energies,
-    force_rematch=False
-):
+def get_manual_matches(match_file, key, source, fit_results, known_energies, force_rematch=False):
     if (not force_rematch) and os.path.exists(match_file):
         try:
             peak_bins, peak_bin_errs, energies = load_manual_matches(match_file, key)
@@ -700,25 +699,17 @@ def get_manual_matches(
             return peak_bins, peak_bin_errs, energies
         except KeyError:
             pass
-        except ValueError as e:
-            print(f"[WARN] Saved matches for {key} are invalid: {e}")
         except Exception as e:
             print(f"[WARN] Could not load saved matches for {key}: {e}")
 
     print(f"[INFO] No saved matches for {key}; entering interactive matching.")
-    peak_bins, peak_bin_errs, energies = manual_match_calibration_peaks(
-        source=source,
-        fit_results=fit_results,
-        known_energies=known_energies
-    )
-
+    peak_bins, peak_bin_errs, energies = manual_match_calibration_peaks(source, fit_results, known_energies)
     save_manual_matches(match_file, key, peak_bins, peak_bin_errs, energies)
     print(f"[INFO] Saved manual matches for {key}")
-
     return peak_bins, peak_bin_errs, energies
 
 # ============================================================
-# Calibration helpers
+# Calibration
 # ============================================================
 
 def calibrate_day_type(
@@ -743,7 +734,6 @@ def calibrate_day_type(
         if source not in source_peak_results:
             print(f"[WARN] No peak results found for {date} {spec_type} {source}")
             continue
-
         try:
             if interactive:
                 key = f"{date}_{spec_type}_{source}"
@@ -761,13 +751,9 @@ def calibrate_day_type(
             bins_list.append(peak_bins)
             bin_errs_list.append(peak_bin_errs)
             energies_list.append(energies)
-
             print(f"[INFO] Using {len(peak_bins)} matched peaks from {source}")
-
-        except ValueError as e:
-            print(f"[WARN] Skipping {source} for {date} {spec_type}: {e}")
         except Exception as e:
-            print(f"[WARN] Unexpected issue with {source} for {date} {spec_type}: {e}")
+            print(f"[WARN] Skipping {source} for {date} {spec_type}: {e}")
 
     if len(bins_list) == 0:
         raise ValueError(f"No usable calibration source peaks found for {date} {spec_type}")
@@ -777,43 +763,21 @@ def calibrate_day_type(
     energies_all = np.concatenate(energies_list)
 
     if len(bins_all) < 2:
-        raise ValueError(
-            f"Need at least two total matched calibration peaks for {date} {spec_type}; "
-            f"got only {len(bins_all)}"
-        )
+        raise ValueError(f"Need at least two total matched calibration peaks for {date} {spec_type}")
 
-    p0 = np.polyfit(bins_all, energies_all, 1)
-    slope0, intercept0 = p0[0], p0[1]
-
-    yerr_eff = np.maximum(np.abs(slope0) * bin_errs_all, 0.5)
-
-    popt, pcov, chi2_val, ndof, p_value = fit_weighted_linear(
-        bins_all, energies_all, yerr_eff
-    )
+    popt, pcov, chi2_val, ndof, p_value = fit_linear_odr(bins_all, energies_all, bin_errs_all)
     slope, intercept = popt
     perr = np.sqrt(np.diag(pcov))
 
     fig, ax = plt.subplots()
     ax.errorbar(
-        bins_all,
-        energies_all,
-        xerr=bin_errs_all,
-        yerr=np.abs(slope) * bin_errs_all,
-        fmt='o',
-        color=CBLUE,
-        ecolor=CBLUE,
-        capsize=3,
-        label="Selected calibration peaks"
+        bins_all, energies_all,
+        xerr=bin_errs_all, yerr=np.abs(slope) * bin_errs_all,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=3, label="Selected calibration peaks"
     )
 
     xdense = np.linspace(0, max(1050, 1.05 * np.max(bins_all)), 400)
-    ax.plot(
-        xdense,
-        weighted_linear(xdense, slope, intercept),
-        color=CRED,
-        lw=2.5,
-        label="Linear fit"
-    )
+    ax.plot(xdense, weighted_linear(xdense, slope, intercept), color=CRED, lw=2.5, label="Linear fit")
 
     textbox = (
         f"$E = m b + c$\n"
@@ -823,12 +787,8 @@ def calibrate_day_type(
         f"$p$ = {p_value:.3f}"
     )
     ax.text(
-        0.98,
-        0.05,
-        textbox,
-        transform=ax.transAxes,
-        ha="right",
-        va="bottom",
+        0.98, 0.05, textbox,
+        transform=ax.transAxes, ha="right", va="bottom",
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
     )
 
@@ -867,7 +827,7 @@ def bin_to_energy(bin_value: float, bin_err: float, cal: CalibrationResult):
     return E, math.sqrt(max(varE, 0.0))
 
 # ============================================================
-# Cs137 peak selection logic
+# Cs137 peak selection and plots
 # ============================================================
 
 def choose_cs137_peak(
@@ -875,12 +835,9 @@ def choose_cs137_peak(
     bins: np.ndarray,
     counts: np.ndarray,
     spec_type: str,
-    min_bin: int = 0
-) -> Tuple[PeakFitResult, Optional[PeakFitResult]]:
-    """
-    Choose the fitted peak closest to the histogram maximum.
-    For recoil, also return the highest-energy extra peak as sanity check.
-    """
+    min_bin: int = 0,
+    rule: str = "closest_to_max"
+):
     valid = [r for r in fit_results if r.success]
     if len(valid) == 0:
         raise ValueError("No successful peak fits for Cs137 spectrum")
@@ -888,35 +845,108 @@ def choose_cs137_peak(
     mask = bins >= min_bin
     bins_use = bins[mask]
     counts_use = counts[mask]
-
     if len(bins_use) == 0:
         raise ValueError("No bins remain after applying min_bin in choose_cs137_peak")
 
     max_bin = bins_use[np.argmax(counts_use)]
-    desired_peak = min(valid, key=lambda r: abs(r.fit_center - max_bin))
+
+    if rule == "closest_to_max":
+        desired_peak = min(valid, key=lambda r: abs(r.fit_center - max_bin))
+
+    elif rule == "highest_count":
+        # Choose the fitted peak whose center lies at the largest histogram count
+        desired_peak = max(
+            valid,
+            key=lambda r: np.interp(r.fit_center, bins_use, counts_use)
+        )
+
+    else:
+        raise ValueError(f"Unknown Cs137 peak rule: {rule}")
 
     sanity_peak = None
     if spec_type == "recoil" and len(valid) > 1:
-        highest_peak = max(valid, key=lambda r: r.fit_center)
-        if highest_peak is not desired_peak:
-            sanity_peak = highest_peak
+        highest_energy_peak = max(valid, key=lambda r: r.fit_center)
+        if highest_energy_peak is not desired_peak:
+            sanity_peak = highest_energy_peak
 
     return desired_peak, sanity_peak
 
+def make_selected_cs137_peak_plot(
+    spectrum: Spectrum,
+    calibration: CalibrationResult,
+    peak_results: List[PeakFitResult],
+    selected_peak: PeakFitResult,
+    output_dir: str = "plots",
+    sanity_peak: Optional[PeakFitResult] = None,
+    min_bin: int = 0
+):
+    mask = spectrum.bins >= min_bin
+    bins_use = spectrum.bins[mask]
+    counts_use = spectrum.counts[mask]
+    energies = calibration.slope * bins_use + calibration.intercept
+    bar_width = np.diff(energies).mean() if len(energies) > 1 else 1.0
+
+    fig, ax = plt.subplots()
+    ax.bar(energies, counts_use, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0, label="Histogram")
+
+    valid = sorted([r for r in peak_results if r.success], key=lambda r: r.fit_center)
+    for r in valid:
+        xpk = calibration.slope * r.fit_center + calibration.intercept
+        ypk = np.interp(r.fit_center, bins_use, counts_use)
+        ax.plot(xpk, ypk, 'o', color=CGRAY, markersize=7)
+
+    Esel, Esel_err = bin_to_energy(selected_peak.fit_center, selected_peak.fit_center_err, calibration)
+    xsel = Esel
+    ysel = np.interp(selected_peak.fit_center, bins_use, counts_use)
+    ax.axvline(xsel, color=CRED, lw=2.5, label="Selected peak")
+    ax.plot(xsel, ysel, 'o', color=CRED, markersize=9)
+
+    textbox = (
+        f"Selected peak = {Esel:.2f} ± {Esel_err:.2f} keV\n"
+        f"$\\chi^2$/ndof = {selected_peak.chi2_val:.2f}/{selected_peak.ndof}\n"
+        f"$p$ = {selected_peak.p_value:.3f}"
+    )
+
+    if sanity_peak is not None:
+        Esan, Esan_err = bin_to_energy(sanity_peak.fit_center, sanity_peak.fit_center_err, calibration)
+        xsan = Esan
+        ysan = np.interp(sanity_peak.fit_center, bins_use, counts_use)
+        ax.axvline(xsan, color=CPURPLE, lw=2, ls='--', label="Sanity peak")
+        ax.plot(xsan, ysan, 'o', color=CPURPLE, markersize=8)
+        textbox += f"\nSanity peak = {Esan:.2f} ± {Esan_err:.2f} keV"
+
+    if min_bin > 0:
+        ax.text(
+            0.02, 0.95, f"Low-bin cutoff applied: bin ≥ {min_bin}",
+            transform=ax.transAxes, ha="left", va="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+        )
+
+    ax.text(
+        0.98, 0.95, textbox,
+        transform=ax.transAxes, ha="right", va="top",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+    )
+
+    ax.set_xlabel("Energy [keV]")
+    ax.set_ylabel("Counts")
+    ax.set_title(f"{spectrum.date} {spectrum.spec_type} {spectrum.angle:.1f}° selected Cs137 peak")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(
+            output_dir,
+            f"{sanitize_filename(f'{spectrum.date}_Cs137_{spectrum.spec_type}_{spectrum.angle}_selected_peak')}.png"
+        ),
+        dpi=200
+    )
+    plt.close(fig)
+
 # ============================================================
-# Calibration overview figure for each day
+# Daily calibration overview
 # ============================================================
 
-def make_daily_calibration_overview(
-    date: str,
-    spectra_map: Dict[Tuple[str, str], Spectrum],
-    peak_map: Dict[Tuple[str, str], List[PeakFitResult]],
-    output_dir: str = "plots"
-):
-    """
-    Create a 2x2 figure for a given day showing:
-      scatter/Na22, scatter/Ba133, recoil/Na22, recoil/Ba133
-    """
+def make_daily_calibration_overview(date, spectra_map, peak_map, output_dir="plots", low_bin_cutoffs=None):
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     layout = [
         ("scatter", "Na22"),
@@ -933,15 +963,13 @@ def make_daily_calibration_overview(
             continue
 
         sp = spectra_map[key]
-        min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle)
+        min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, low_bin_cutoffs)
         mask = sp.bins >= min_bin
         bins_use = sp.bins[mask]
         counts_use = sp.counts[mask]
 
         ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
-
-        results = peak_map.get(key, [])
-        valid = sorted([r for r in results if r.success], key=lambda r: r.fit_center)
+        valid = sorted([r for r in peak_map.get(key, []) if r.success], key=lambda r: r.fit_center)
 
         for i, r in enumerate(valid):
             yval = np.interp(r.fit_center, bins_use, counts_use)
@@ -951,19 +979,14 @@ def make_daily_calibration_overview(
                 r.fit_center,
                 yval + 0.03 * np.max(counts_use) if np.max(counts_use) > 0 else yval + 1,
                 f"{i}",
-                color=CBLACK,
-                ha="center",
-                va="bottom",
-                fontsize=11,
+                color=CBLACK, ha="center", va="bottom", fontsize=11,
                 bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none")
             )
 
         if min_bin > 0:
             ax.text(
-                0.02, 0.95,
-                f"bin ≥ {min_bin}",
-                transform=ax.transAxes,
-                ha="left", va="top",
+                0.02, 0.95, f"bin ≥ {min_bin}",
+                transform=ax.transAxes, ha="left", va="top",
                 bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
             )
 
@@ -977,7 +1000,254 @@ def make_daily_calibration_overview(
     plt.close(fig)
 
 # ============================================================
-# Main analysis workflow
+# Energy sum and Compton plots
+# ============================================================
+
+def make_energy_sum_plot(sums, output_dir="plots", filename="energy_sum_vs_angle.png"):
+    if len(sums) == 0:
+        return None
+
+    angles = np.array([x[1] for x in sums], dtype=float)
+    Etots = np.array([x[4] for x in sums], dtype=float)
+    Eerrs = np.array([x[5] for x in sums], dtype=float)
+
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        angles, Etots, yerr=Eerrs,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured sums"
+    )
+
+    expected_energy = 661.6
+    mean_all, mean_all_err = mean_with_propagated_uncertainty(Etots, Eerrs)
+
+    mask_no_310 = ~np.isclose(angles, 310.0)
+    if np.any(mask_no_310):
+        mean_no_310, mean_no_310_err = mean_with_propagated_uncertainty(Etots[mask_no_310], Eerrs[mask_no_310])
+    else:
+        mean_no_310, mean_no_310_err = np.nan, np.nan
+
+    ax.axhline(expected_energy, color=CRED, lw=2.5, ls='--', label=f"Expected: {expected_energy:.1f} keV")
+    ax.axhline(mean_all, color=CGREEN, lw=2.5, ls='-.', label=f"Mean (all): {mean_all:.1f} keV")
+    if np.isfinite(mean_no_310):
+        ax.axhline(mean_no_310, color=CPURPLE, lw=2.5, ls=':', label=f"Mean (excluding 310°): {mean_no_310:.1f} keV")
+
+    ax.set_xlabel("Scattering angle [deg]")
+    ax.set_ylabel(r"$E_{\mathrm{scatter}} + E_{\mathrm{recoil}}$ [keV]")
+    ax.set_title("Sum of scatter and recoil energies vs angle")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, filename), dpi=200)
+    plt.close(fig)
+
+    return {
+        "including_310": {
+            "mean_keV": mean_all,
+            "stat_err_keV": mean_all_err,
+            "sem_keV": sample_sem(Etots),
+        },
+        "excluding_310": {
+            "mean_keV": mean_no_310,
+            "stat_err_keV": mean_no_310_err,
+            "sem_keV": sample_sem(Etots[mask_no_310]) if np.any(mask_no_310) else np.nan,
+        }
+    }
+
+def make_inverse_scatter_energy_plot(cs_energies, output_dir="plots",
+                                     incident_energy_keV=CS137_ENERGY_KEV,
+                                     electron_rest_energy_keV=ELECTRON_REST_ENERGY_KEV):
+    scatter = sorted([c for c in cs_energies if c.spec_type == "scatter"], key=lambda x: x.angle)
+    if len(scatter) == 0:
+        print("[WARN] No scatter energies available for inverse scatter-energy plot.")
+        return
+
+    theta = np.array([c.angle for c in scatter], dtype=float)
+    E = np.array([c.energy_keV for c in scatter], dtype=float)
+    Eerr = np.array([c.energy_err_keV for c in scatter], dtype=float)
+
+    x = one_minus_cos_theta(theta)
+    y, yerr = inverse_with_error(E, Eerr)
+
+    x_theory = np.linspace(0.0, max(1.05 * np.max(x), 2.05), 500)
+    y_theory = (1.0 / incident_energy_keV) + (1.0 / electron_rest_energy_keV) * x_theory
+
+    fig, ax = plt.subplots()
+    ax.errorbar(x, y, yerr=yerr, fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8, label="Measured data")
+    ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
+
+    textbox = (
+        r"$\frac{1}{E_\gamma'} = \frac{1}{E_0} + \frac{1}{m_ec^2}(1-\cos\theta)$" "\n"
+        f"$E_0$ = {incident_energy_keV:.3f} keV\n"
+        f"$m_ec^2$ = {electron_rest_energy_keV:.3f} keV"
+    )
+    ax.text(
+        0.98, 0.05, textbox,
+        transform=ax.transAxes, ha="right", va="bottom",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+    )
+
+    ax.set_xlabel(r"$1-\cos\theta$")
+    ax.set_ylabel(r"$1/E_{\mathrm{scatter}}$ [keV$^{-1}$]")
+    ax.set_title(r"Inverse scattered-photon energy vs $1-\cos\theta$")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "inverse_scatter_energy_vs_one_minus_cos.png"), dpi=200)
+    plt.close(fig)
+
+def make_inverse_recoil_energy_plot(cs_energies, output_dir="plots",
+                                    incident_energy_keV=CS137_ENERGY_KEV,
+                                    electron_rest_energy_keV=ELECTRON_REST_ENERGY_KEV):
+    recoil = sorted([c for c in cs_energies if c.spec_type == "recoil"], key=lambda x: x.angle)
+    if len(recoil) == 0:
+        print("[WARN] No recoil energies available for inverse recoil-energy plot.")
+        return
+
+    theta = np.array([c.angle for c in recoil], dtype=float)
+    T = np.array([c.energy_keV for c in recoil], dtype=float)
+    Terr = np.array([c.energy_err_keV for c in recoil], dtype=float)
+
+    x_raw = one_minus_cos_theta(theta)
+    valid = x_raw > 0
+    theta = theta[valid]
+    T = T[valid]
+    Terr = Terr[valid]
+    x = 1.0 / x_raw[valid]
+    y, yerr = inverse_with_error(T, Terr)
+
+    if len(x) == 0:
+        print("[WARN] No valid recoil points for inverse recoil-energy plot.")
+        return
+
+    x_theory = np.linspace(0.0, 1.05 * np.max(x), 500)
+    y_theory = (1.0 / incident_energy_keV) + (electron_rest_energy_keV / incident_energy_keV**2) * x_theory
+
+    fig, ax = plt.subplots()
+    ax.errorbar(x, y, yerr=yerr, fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8, label="Measured data")
+    ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
+
+    textbox = (
+        r"$\frac{1}{T_e} = \frac{1}{E_0} + \frac{m_ec^2}{E_0^2}\frac{1}{1-\cos\theta}$" "\n"
+        f"$E_0$ = {incident_energy_keV:.3f} keV\n"
+        f"$m_ec^2$ = {electron_rest_energy_keV:.3f} keV"
+    )
+    ax.text(
+        0.98, 0.05, textbox,
+        transform=ax.transAxes, ha="right", va="bottom",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+    )
+
+    ax.set_xlabel(r"$1/(1-\cos\theta)$")
+    ax.set_ylabel(r"$1/E_{\mathrm{recoil}}$ [keV$^{-1}$]")
+    ax.set_title(r"Inverse recoil-electron energy vs $1/(1-\cos\theta)$")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "inverse_recoil_energy_vs_inv_one_minus_cos.png"), dpi=200)
+    plt.close(fig)
+
+# ============================================================
+# Uncertainty budget reporting
+# ============================================================
+
+def print_uncertainty_budget(main_results, sys_summary=None):
+    print("\n" + "=" * 80)
+    print("UNCERTAINTY BUDGET")
+    print("=" * 80)
+
+    print("\nSTATISTICAL UNCERTAINTIES INCLUDED IN THE CODE")
+    print("1. Histogram counting statistics")
+    print("   - Each fitted histogram bin is assigned Poisson uncertainty sqrt(N), with a floor of 1 count.")
+    print("   - This enters every Gaussian + linear peak fit.")
+
+    print("2. Peak-position fit uncertainty")
+    print("   - For each accepted peak, the peak-center uncertainty is taken from the fit covariance matrix:")
+    print("       sigma_mu = sqrt(Cov(mu, mu))")
+    print("   - This is the statistical uncertainty from the local fit model.")
+
+    print("3. Calibration uncertainty")
+    print("   - Daily calibration is done separately for scatter and recoil.")
+    print("   - Na22 and Ba133 calibration points are combined into one fit.")
+    print("   - Orthogonal Distance Regression (ODR) is used so the uncertainty in peak-bin position")
+    print("     is correctly included in the linear calibration fit.")
+
+    print("4. Bin-to-energy propagation")
+    print("   - For E = m b + c, the code propagates:")
+    print("       sigma_E^2 = b^2 Var(m) + Var(c) + m^2 sigma_b^2 + 2 b Cov(m,c)")
+
+    print("5. Sum-energy uncertainty")
+    print("   - For E_sum = E_scatter + E_recoil, the code uses:")
+    print("       sigma_sum = sqrt(sigma_scatter^2 + sigma_recoil^2)")
+    print("   - This is appropriate because scatter and recoil are calibrated separately in the code.")
+
+    print("6. Mean-energy uncertainty")
+    print("   - For the mean of the sums, the reported statistical uncertainty is the propagated")
+    print("     uncertainty of the mean from the individual point uncertainties:")
+    print("       sigma_mean = sqrt(sum_i sigma_i^2) / N")
+    print("   - The sample SEM from the spread is also computed and printed to console.")
+
+    print("\nSYSTEMATIC UNCERTAINTIES ESTIMATED BY THE CODE")
+    print("The code includes an analysis-variation study. It repeats the analysis while varying:")
+    print("   - Gaussian fit half-width")
+    print("   - low-bin cutoff")
+    print("   - p-value threshold for accepting peaks")
+    print("   - Cs137 peak-selection rule (currently only one implemented, but machinery exists)")
+    print("The systematic uncertainty is estimated as the standard deviation of the resulting")
+    print("final quantities across those analysis variations.")
+
+    print("\nSYSTEMATIC UNCERTAINTIES NOT FULLY CAPTURED AUTOMATICALLY")
+    print("1. Manual peak-matching choices")
+    print("   - The calibration uses manually saved Na22/Ba133 peak matches.")
+    print("   - If you choose different valid calibration peaks, results may shift.")
+    print("   - To estimate this, repeat the calibration with alternative reasonable matches.")
+
+    print("2. Model inadequacy in peak fitting")
+    print("   - Peaks are fit with Gaussian + linear background.")
+    print("   - Real detector peaks may be asymmetric or have non-Gaussian tails.")
+    print("   - This is not fully captured by statistical covariance matrices.")
+
+    print("3. Residual calibration nonlinearity")
+    print("   - The code assumes a linear calibration.")
+    print("   - If the detector response is weakly nonlinear, that would be a systematic effect.")
+
+    print("4. Possible angular uncertainty")
+    print("   - The current plots treat scattering angle as exact.")
+    print("   - If you know your angular uncertainty, it should be propagated into")
+    print("     the Compton-relation plots.")
+
+    print("5. Gain drift within a day")
+    print("   - Daily calibration is assumed valid for all spectra from that day/type.")
+    print("   - Time drift within a day is not modeled separately.")
+
+    if main_results.get("mean_results") is not None:
+        mr = main_results["mean_results"]
+        print("\nMEAN SUM RESULTS")
+        print(
+            f"Including 310°: mean = {mr['including_310']['mean_keV']:.2f} keV, "
+            f"stat = {mr['including_310']['stat_err_keV']:.2f} keV, "
+            f"SEM = {mr['including_310']['sem_keV']:.2f} keV"
+        )
+        if np.isfinite(mr["excluding_310"]["mean_keV"]):
+            print(
+                f"Excluding 310°: mean = {mr['excluding_310']['mean_keV']:.2f} keV, "
+                f"stat = {mr['excluding_310']['stat_err_keV']:.2f} keV, "
+                f"SEM = {mr['excluding_310']['sem_keV']:.2f} keV"
+            )
+
+    if sys_summary is not None and main_results.get("mean_results") is not None:
+        stat_all = main_results["mean_results"]["including_310"]["stat_err_keV"]
+        sys_all = sys_summary["mean_including_310_systematic_keV"]
+        tot_all = combine_stat_and_sys(stat_all, sys_all)
+
+        stat_no = main_results["mean_results"]["excluding_310"]["stat_err_keV"]
+        sys_no = sys_summary["mean_excluding_310_systematic_keV"]
+        tot_no = combine_stat_and_sys(stat_no, sys_no)
+
+        print("\nSYSTEMATIC CONTRIBUTIONS TO FINAL MEANS")
+        print(f"Including 310°: systematic = {sys_all:.2f} keV, total = {tot_all:.2f} keV")
+        if np.isfinite(main_results["mean_results"]["excluding_310"]["mean_keV"]):
+            print(f"Excluding 310°: systematic = {sys_no:.2f} keV, total = {tot_no:.2f} keV")
+
+# ============================================================
+# Main analysis
 # ============================================================
 
 def analyze_compton_data(
@@ -985,18 +1255,25 @@ def analyze_compton_data(
     output_dir: str = "plots",
     known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV,
     match_file: str = "manual_matches.json",
-    force_rematch: bool = False
+    force_rematch: bool = False,
+    low_bin_cutoffs: Optional[Dict[Tuple[str, str, str], int]] = None,
+    fit_half_width: int = 12,
+    p_value_cut: float = 0.05,
+    cs_peak_rule: str = "closest_to_max",
+    save_plots: bool = True,
+    interactive_calibration: bool = True,
 ):
     os.makedirs(output_dir, exist_ok=True)
+    if low_bin_cutoffs is None:
+        low_bin_cutoffs = LOW_BIN_CUTOFFS
 
     spectra = load_all_spectra(data_dir)
 
-    by_date_type_source: Dict[Tuple[str, str, str], List[Spectrum]] = {}
+    by_date_type_source = {}
     for sp in spectra:
-        key = (sp.date, sp.spec_type, sp.source)
-        by_date_type_source.setdefault(key, []).append(sp)
+        by_date_type_source.setdefault((sp.date, sp.spec_type, sp.source), []).append(sp)
 
-    calibrations: Dict[Tuple[str, str], CalibrationResult] = {}
+    calibrations = {}
 
     all_dates = sorted(set(sp.date for sp in spectra))
     for date in all_dates:
@@ -1014,22 +1291,18 @@ def analyze_compton_data(
                 sp = by_date_type_source[key][0]
                 day_spectra_map[(spec_type, source)] = sp
 
-                min_bin = get_low_bin_cutoff(
-                    date=sp.date,
-                    source=sp.source,
-                    spec_type=sp.spec_type,
-                    angle=sp.angle
-                )
+                min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, low_bin_cutoffs)
 
                 peak_results = find_and_fit_peaks(
                     sp.bins,
                     sp.counts,
                     title_prefix=f"{date}_{source}_{spec_type}",
                     output_dir=output_dir,
-                    source_hint=source,
                     min_bin=min_bin,
                     calibration=None,
-                    min_p_value=0.05
+                    min_p_value=p_value_cut,
+                    fit_half_width=fit_half_width,
+                    save_plots=save_plots
                 )
                 source_peak_results[source] = peak_results
                 day_peak_map[(spec_type, source)] = peak_results
@@ -1042,25 +1315,30 @@ def analyze_compton_data(
                         source_peak_results=source_peak_results,
                         output_dir=output_dir,
                         known_peaks_dict=known_peaks_dict,
-                        interactive=True,
+                        interactive=interactive_calibration,
                         match_file=match_file,
                         force_rematch=force_rematch
                     )
                     calibrations[(date, spec_type)] = cal
                     print(f"[OK] Calibration built for {date} {spec_type}")
-                    print(f"     E = ({cal.slope:.5f} ± {cal.slope_err:.5f}) * bin + ({cal.intercept:.3f} ± {cal.intercept_err:.3f}) keV")
+                    print(
+                        f"     E = ({cal.slope:.5f} ± {cal.slope_err:.5f}) * bin + "
+                        f"({cal.intercept:.3f} ± {cal.intercept_err:.3f}) keV"
+                    )
                 except Exception as e:
                     print(f"[WARN] Could not calibrate {date} {spec_type}: {e}")
 
-        make_daily_calibration_overview(
-            date=date,
-            spectra_map=day_spectra_map,
-            peak_map=day_peak_map,
-            output_dir=output_dir
-        )
+        if save_plots:
+            make_daily_calibration_overview(
+                date=date,
+                spectra_map=day_spectra_map,
+                peak_map=day_peak_map,
+                output_dir=output_dir,
+                low_bin_cutoffs=low_bin_cutoffs
+            )
 
-    cs_energies: List[CsPeakEnergy] = []
-    cs_sanity: List[CsPeakEnergy] = []
+    cs_energies = []
+    cs_sanity = []
 
     for sp in spectra:
         if sp.source != "Cs137":
@@ -1072,23 +1350,18 @@ def analyze_compton_data(
             continue
 
         cal = calibrations[cal_key]
-
-        min_bin = get_low_bin_cutoff(
-            date=sp.date,
-            source=sp.source,
-            spec_type=sp.spec_type,
-            angle=sp.angle
-        )
+        min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, low_bin_cutoffs)
 
         peak_results = find_and_fit_peaks(
             sp.bins,
             sp.counts,
             title_prefix=f"{sp.date}_{sp.source}_{sp.spec_type}_{sp.angle}",
             output_dir=output_dir,
-            source_hint="Cs137",
             min_bin=min_bin,
             calibration=cal,
-            min_p_value=0.05
+            min_p_value=p_value_cut,
+            fit_half_width=fit_half_width,
+            save_plots=save_plots
         )
 
         try:
@@ -1097,7 +1370,8 @@ def analyze_compton_data(
                 bins=sp.bins,
                 counts=sp.counts,
                 spec_type=sp.spec_type,
-                min_bin=min_bin
+                min_bin=min_bin,
+                rule=cs_peak_rule
             )
 
             E, Eerr = bin_to_energy(desired_peak.fit_center, desired_peak.fit_center_err, cal)
@@ -1130,6 +1404,17 @@ def analyze_compton_data(
                     note="high-energy sanity peak"
                 ))
 
+            if save_plots:
+                make_selected_cs137_peak_plot(
+                    spectrum=sp,
+                    calibration=cal,
+                    peak_results=peak_results,
+                    selected_peak=desired_peak,
+                    sanity_peak=sanity_peak,
+                    output_dir=output_dir,
+                    min_bin=min_bin
+                )
+
         except Exception as e:
             print(f"[WARN] Could not determine Cs137 peak for {sp.filename}: {e}")
 
@@ -1144,39 +1429,21 @@ def analyze_compton_data(
         Etot_err = math.sqrt(s.energy_err_keV**2 + r.energy_err_keV**2)
         sums.append((key[0], key[1], s, r, Etot, Etot_err))
 
-    if len(sums) > 0:
-        fig, ax = plt.subplots()
+    mean_results = None
+    if len(sums) > 0 and save_plots:
+        mean_results = make_energy_sum_plot(sums, output_dir=output_dir, filename="energy_sum_vs_angle.png")
+    elif len(sums) > 0:
+        # still compute means
         angles = np.array([x[1] for x in sums], dtype=float)
         Etots = np.array([x[4] for x in sums], dtype=float)
         Eerrs = np.array([x[5] for x in sums], dtype=float)
-
-        ax.errorbar(
-            angles, Etots, yerr=Eerrs,
-            fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
-            label="Measured sums"
-        )
-
-        expected_energy = 661.657
-        mean_all = np.mean(Etots)
-
+        mean_all, mean_all_err = mean_with_propagated_uncertainty(Etots, Eerrs)
         mask_no_310 = ~np.isclose(angles, 310.0)
-        if np.any(mask_no_310):
-            mean_no_310 = np.mean(Etots[mask_no_310])
-        else:
-            mean_no_310 = np.nan
-
-        ax.axhline(expected_energy, color=CRED, lw=2.5, ls='--', label=f"Expected: {expected_energy:.1f} keV")
-        ax.axhline(mean_all, color=CGREEN, lw=2.5, ls='-.', label=f"Mean (all): {mean_all:.1f} keV")
-        if np.isfinite(mean_no_310):
-            ax.axhline(mean_no_310, color=CPURPLE, lw=2.5, ls=':', label=f"Mean (excluding 310°): {mean_no_310:.1f} keV")
-
-        ax.set_xlabel("Scattering angle [deg]")
-        ax.set_ylabel(r"$E_{\mathrm{scatter}} + E_{\mathrm{recoil}}$ [keV]")
-        ax.set_title("Sum of scatter and recoil energies vs angle")
-        ax.legend(loc="best")
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "energy_sum_vs_angle.png"), dpi=200)
-        plt.close(fig)
+        mean_no_310, mean_no_310_err = mean_with_propagated_uncertainty(Etots[mask_no_310], Eerrs[mask_no_310]) if np.any(mask_no_310) else (np.nan, np.nan)
+        mean_results = {
+            "including_310": {"mean_keV": mean_all, "stat_err_keV": mean_all_err, "sem_keV": sample_sem(Etots)},
+            "excluding_310": {"mean_keV": mean_no_310, "stat_err_keV": mean_no_310_err, "sem_keV": sample_sem(Etots[mask_no_310]) if np.any(mask_no_310) else np.nan}
+        }
 
     print("\n=== Calibrations ===")
     for key, cal in calibrations.items():
@@ -1190,19 +1457,36 @@ def analyze_compton_data(
     for c in sorted(cs_energies, key=lambda x: (x.date, x.spec_type, x.angle)):
         print(
             f"{c.date} {c.spec_type:7s} angle={c.angle:6.1f} deg: "
-            f"bin = {c.peak_bin:.2f} ± {c.peak_bin_err:.2f}, "
             f"E = {c.energy_keV:.2f} ± {c.energy_err_keV:.2f} keV, "
-            f"chi2 p = {c.p_value:.3f}"
+            f"bin = {c.peak_bin:.2f} ± {c.peak_bin_err:.2f}, "
+            f"p = {c.p_value:.3f}"
         )
 
     if len(cs_sanity) > 0:
         print("\n=== Cs137 recoil high-energy sanity peaks ===")
         for c in sorted(cs_sanity, key=lambda x: (x.date, x.angle)):
             print(
-                f"{c.date} recoil  angle={c.angle:6.1f} deg: "
-                f"bin = {c.peak_bin:.2f} ± {c.peak_bin_err:.2f}, "
+                f"{c.date} recoil angle={c.angle:6.1f} deg: "
                 f"E = {c.energy_keV:.2f} ± {c.energy_err_keV:.2f} keV"
             )
+
+    if len(cs_sanity) > 0:
+        sanity_energies = np.array([c.energy_keV for c in cs_sanity], dtype=float)
+        sanity_errors = np.array([c.energy_err_keV for c in cs_sanity], dtype=float)
+
+        sanity_mean, sanity_mean_err = mean_with_propagated_uncertainty(
+            sanity_energies, sanity_errors
+        )
+        sanity_sem = sample_sem(sanity_energies)
+
+        print("\n=== Cs137 recoil sanity-peak mean ===")
+        print(
+            f"Mean sanity-peak energy = {sanity_mean:.2f} ± {sanity_mean_err:.2f} keV "
+            f"(propagated)"
+        )
+        print(
+            f"SEM from spread = {sanity_sem:.2f} keV"
+        )
 
     print("\n=== Energy sums ===")
     for date, angle, s, r, Etot, Etot_err in sums:
@@ -1213,16 +1497,132 @@ def analyze_compton_data(
             f"sum = {Etot:.2f} ± {Etot_err:.2f} keV"
         )
 
+    if mean_results is not None:
+        print("\n=== Mean energy sums ===")
+        print(
+            f"Including 310°: mean = {mean_results['including_310']['mean_keV']:.2f} ± "
+            f"{mean_results['including_310']['stat_err_keV']:.2f} keV (stat), "
+            f"SEM = {mean_results['including_310']['sem_keV']:.2f} keV"
+        )
+        if np.isfinite(mean_results["excluding_310"]["mean_keV"]):
+            print(
+                f"Excluding 310°: mean = {mean_results['excluding_310']['mean_keV']:.2f} ± "
+                f"{mean_results['excluding_310']['stat_err_keV']:.2f} keV (stat), "
+                f"SEM = {mean_results['excluding_310']['sem_keV']:.2f} keV"
+            )
+
+    # Final plots should be last
+    if save_plots:
+        make_inverse_scatter_energy_plot(cs_energies=cs_energies, output_dir=output_dir)
+        make_inverse_recoil_energy_plot(cs_energies=cs_energies, output_dir=output_dir)
+
     return {
         "spectra": spectra,
         "calibrations": calibrations,
         "cs_energies": cs_energies,
         "cs_sanity": cs_sanity,
-        "energy_sums": sums
+        "energy_sums": sums,
+        "mean_results": mean_results
     }
 
 # ============================================================
-# Example usage
+# Systematic uncertainty machinery
+# ============================================================
+
+def build_systematic_variations(base_low_bin_cutoffs=None):
+    if base_low_bin_cutoffs is None:
+        base_low_bin_cutoffs = LOW_BIN_CUTOFFS
+
+    variations = []
+    for fit_half_width in SYSTEMATIC_CONFIG["fit_half_width_values"]:
+        for p_cut in SYSTEMATIC_CONFIG["p_value_cut_values"]:
+            for low_shift in SYSTEMATIC_CONFIG["low_bin_cut_shifts"]:
+                for cs_rule in SYSTEMATIC_CONFIG["cs_peak_rules"]:
+                    shifted = {}
+                    for k, v in copy.deepcopy(base_low_bin_cutoffs).items():
+                        shifted[k] = max(0, v + low_shift)
+                    variations.append({
+                        "fit_half_width": fit_half_width,
+                        "p_value_cut": p_cut,
+                        "low_bin_cutoffs": shifted,
+                        "cs_peak_rule": cs_rule,
+                        "label": f"fhw={fit_half_width}, p={p_cut}, cutshift={low_shift}, csr={cs_rule}"
+                    })
+    return variations
+
+def run_systematic_study(
+    data_dir: str,
+    output_dir: str = "plots",
+    known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV,
+    match_file: str = "manual_matches.json",
+    base_low_bin_cutoffs=None
+):
+    variations = build_systematic_variations(base_low_bin_cutoffs)
+    systematic_runs = []
+
+    print("\n" + "=" * 80)
+    print("Running systematic study")
+    print("=" * 80)
+
+    for i, var in enumerate(variations, start=1):
+        print(f"[SYS {i}/{len(variations)}] {var['label']}")
+        try:
+            result = analyze_compton_data(
+                data_dir=data_dir,
+                output_dir=output_dir,
+                known_peaks_dict=known_peaks_dict,
+                match_file=match_file,
+                force_rematch=False,
+                low_bin_cutoffs=var["low_bin_cutoffs"],
+                fit_half_width=var["fit_half_width"],
+                p_value_cut=var["p_value_cut"],
+                cs_peak_rule=var["cs_peak_rule"],
+                save_plots=False,
+                interactive_calibration=True
+            )
+            systematic_runs.append({"variation": var, "result": result})
+        except Exception as e:
+            print(f"[WARN] Systematic variation failed: {var['label']} :: {e}")
+
+    return systematic_runs
+
+def summarize_systematics(systematic_runs):
+    if len(systematic_runs) == 0:
+        return None
+
+    values_by_angle = {}
+    for run in systematic_runs:
+        for _, angle, _, _, Etot, _ in run["result"]["energy_sums"]:
+            values_by_angle.setdefault(angle, []).append(Etot)
+
+    angle_systematics = {}
+    for angle, vals in values_by_angle.items():
+        angle_systematics[angle] = {
+            "values_keV": vals,
+            "systematic_err_keV": systematic_uncertainty_from_variations(vals)
+        }
+
+    mean_all_vals = []
+    mean_no_310_vals = []
+    for run in systematic_runs:
+        mr = run["result"]["mean_results"]
+        if mr is None:
+            continue
+        if np.isfinite(mr["including_310"]["mean_keV"]):
+            mean_all_vals.append(mr["including_310"]["mean_keV"])
+        if np.isfinite(mr["excluding_310"]["mean_keV"]):
+            mean_no_310_vals.append(mr["excluding_310"]["mean_keV"])
+
+    return {
+        "by_angle": angle_systematics,
+        "mean_including_310_systematic_keV": systematic_uncertainty_from_variations(mean_all_vals),
+        "mean_excluding_310_systematic_keV": systematic_uncertainty_from_variations(mean_no_310_vals),
+        "mean_including_310_values_keV": mean_all_vals,
+        "mean_excluding_310_values_keV": mean_no_310_vals,
+    }
+
+# ============================================================
+# Main
 # ============================================================
 
 if __name__ == "__main__":
@@ -1235,5 +1635,53 @@ if __name__ == "__main__":
         output_dir=OUTPUT_DIR,
         known_peaks_dict=KNOWN_PEAKS_KEV,
         match_file=MATCH_FILE,
-        force_rematch=False
+        force_rematch=False,
+        low_bin_cutoffs=LOW_BIN_CUTOFFS,
+        fit_half_width=12,
+        p_value_cut=0.05,
+        cs_peak_rule="closest_to_max",
+        save_plots=True,
+        interactive_calibration=True
     )
+
+    sys_summary = None
+    if SYSTEMATIC_CONFIG["enabled"]:
+        sys_runs = run_systematic_study(
+            data_dir=DATA_DIR,
+            output_dir=OUTPUT_DIR,
+            known_peaks_dict=KNOWN_PEAKS_KEV,
+            match_file=MATCH_FILE,
+            base_low_bin_cutoffs=LOW_BIN_CUTOFFS
+        )
+        sys_summary = summarize_systematics(sys_runs)
+
+        if sys_summary is not None:
+            print("\n" + "=" * 80)
+            print("Systematic uncertainty summary")
+            print("=" * 80)
+
+            print("\nBy angle:")
+            for angle in sorted(sys_summary["by_angle"].keys()):
+                sys_err = sys_summary["by_angle"][angle]["systematic_err_keV"]
+                print(f"  angle = {angle:6.1f} deg: systematic = {sys_err:.2f} keV")
+
+            if results["mean_results"] is not None:
+                stat_all = results["mean_results"]["including_310"]["stat_err_keV"]
+                sys_all = sys_summary["mean_including_310_systematic_keV"]
+                tot_all = combine_stat_and_sys(stat_all, sys_all)
+
+                stat_no = results["mean_results"]["excluding_310"]["stat_err_keV"]
+                sys_no = sys_summary["mean_excluding_310_systematic_keV"]
+                tot_no = combine_stat_and_sys(stat_no, sys_no)
+
+                print("\nMean including 310°:")
+                print(f"  statistical = {stat_all:.2f} keV")
+                print(f"  systematic  = {sys_all:.2f} keV")
+                print(f"  total       = {tot_all:.2f} keV")
+
+                print("\nMean excluding 310°:")
+                print(f"  statistical = {stat_no:.2f} keV")
+                print(f"  systematic  = {sys_no:.2f} keV")
+                print(f"  total       = {tot_no:.2f} keV")
+
+    print_uncertainty_budget(results, sys_summary)
