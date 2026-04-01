@@ -1003,34 +1003,54 @@ def make_daily_calibration_overview(date, spectra_map, peak_map, output_dir="plo
 # Energy sum and Compton plots
 # ============================================================
 
-def make_energy_sum_plot(sums, output_dir="plots", filename="energy_sum_vs_angle.png"):
+def make_energy_sum_plot(
+    sums,
+    output_dir="plots",
+    filename="energy_sum_vs_angle.png",
+    systematic_summary=None
+):
     if len(sums) == 0:
         return None
 
     angles = np.array([x[1] for x in sums], dtype=float)
     Etots = np.array([x[4] for x in sums], dtype=float)
-    Eerrs = np.array([x[5] for x in sums], dtype=float)
+    Eerrs_stat = np.array([x[5] for x in sums], dtype=float)
+
+    if systematic_summary is not None:
+        Eerrs_sys = np.array([
+            get_angle_systematic(systematic_summary.get("sum_by_angle", None), ang)
+            for ang in angles
+        ], dtype=float)
+        _, Eerrs_plot = combine_point_stat_and_sys(Etots, Eerrs_stat, Eerrs_sys)
+    else:
+        Eerrs_sys = np.full_like(Eerrs_stat, np.nan, dtype=float)
+        Eerrs_plot = Eerrs_stat
 
     fig, ax = plt.subplots()
     ax.errorbar(
-        angles, Etots, yerr=Eerrs,
+        angles, Etots, yerr=Eerrs_plot,
         fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
         label="Measured sums"
     )
 
     expected_energy = 661.6
-    mean_all, mean_all_err = mean_with_propagated_uncertainty(Etots, Eerrs)
+    mean_all, mean_all_err = mean_with_propagated_uncertainty(Etots, Eerrs_stat)
 
     mask_no_310 = ~np.isclose(angles, 310.0)
     if np.any(mask_no_310):
-        mean_no_310, mean_no_310_err = mean_with_propagated_uncertainty(Etots[mask_no_310], Eerrs[mask_no_310])
+        mean_no_310, mean_no_310_err = mean_with_propagated_uncertainty(
+            Etots[mask_no_310], Eerrs_stat[mask_no_310]
+        )
     else:
         mean_no_310, mean_no_310_err = np.nan, np.nan
 
-    ax.axhline(expected_energy, color=CRED, lw=2.5, ls='--', label=f"Expected: {expected_energy:.1f} keV")
-    ax.axhline(mean_all, color=CGREEN, lw=2.5, ls='-.', label=f"Mean (all): {mean_all:.1f} keV")
+    ax.axhline(expected_energy, color=CRED, lw=2.5, ls='--',
+               label=f"Expected: {expected_energy:.1f} keV")
+    ax.axhline(mean_all, color=CGREEN, lw=2.5, ls='-.',
+               label=f"Mean (all): {mean_all:.1f} keV")
     if np.isfinite(mean_no_310):
-        ax.axhline(mean_no_310, color=CPURPLE, lw=2.5, ls=':', label=f"Mean (excluding 310°): {mean_no_310:.1f} keV")
+        ax.axhline(mean_no_310, color=CPURPLE, lw=2.5, ls=':',
+                   label=f"Mean (excluding 310°): {mean_no_310:.1f} keV")
 
     ax.set_xlabel("Scattering angle [deg]")
     ax.set_ylabel(r"$E_{\mathrm{scatter}} + E_{\mathrm{recoil}}$ [keV]")
@@ -1040,22 +1060,42 @@ def make_energy_sum_plot(sums, output_dir="plots", filename="energy_sum_vs_angle
     plt.savefig(os.path.join(output_dir, filename), dpi=200)
     plt.close(fig)
 
+    sys_all = np.nan
+    sys_no_310 = np.nan
+    tot_all = mean_all_err
+    tot_no_310 = mean_no_310_err
+
+    if systematic_summary is not None:
+        sys_all = systematic_summary.get("mean_including_310_systematic_keV", np.nan)
+        sys_no_310 = systematic_summary.get("mean_excluding_310_systematic_keV", np.nan)
+        tot_all = combine_stat_and_sys(mean_all_err, sys_all)
+        tot_no_310 = combine_stat_and_sys(mean_no_310_err, sys_no_310)
+
     return {
         "including_310": {
             "mean_keV": mean_all,
             "stat_err_keV": mean_all_err,
+            "sys_err_keV": sys_all,
+            "total_err_keV": tot_all,
             "sem_keV": sample_sem(Etots),
         },
         "excluding_310": {
             "mean_keV": mean_no_310,
             "stat_err_keV": mean_no_310_err,
+            "sys_err_keV": sys_no_310,
+            "total_err_keV": tot_no_310,
             "sem_keV": sample_sem(Etots[mask_no_310]) if np.any(mask_no_310) else np.nan,
         }
     }
 
-def make_inverse_scatter_energy_plot(cs_energies, output_dir="plots",
-                                     incident_energy_keV=CS137_ENERGY_KEV,
-                                     electron_rest_energy_keV=ELECTRON_REST_ENERGY_KEV):
+def make_inverse_scatter_energy_plot(
+    cs_energies,
+    output_dir="plots",
+    incident_energy_keV=CS137_ENERGY_KEV,
+    electron_rest_energy_keV=ELECTRON_REST_ENERGY_KEV,
+    systematic_summary=None,
+    filename="inverse_scatter_energy_vs_one_minus_cos.png"
+):
     scatter = sorted([c for c in cs_energies if c.spec_type == "scatter"], key=lambda x: x.angle)
     if len(scatter) == 0:
         print("[WARN] No scatter energies available for inverse scatter-energy plot.")
@@ -1063,7 +1103,16 @@ def make_inverse_scatter_energy_plot(cs_energies, output_dir="plots",
 
     theta = np.array([c.angle for c in scatter], dtype=float)
     E = np.array([c.energy_keV for c in scatter], dtype=float)
-    Eerr = np.array([c.energy_err_keV for c in scatter], dtype=float)
+    Eerr_stat = np.array([c.energy_err_keV for c in scatter], dtype=float)
+
+    if systematic_summary is not None:
+        Eerr_sys = np.array([
+            get_angle_systematic(systematic_summary.get("scatter_by_angle", None), ang)
+            for ang in theta
+        ], dtype=float)
+        _, Eerr = combine_point_stat_and_sys(E, Eerr_stat, Eerr_sys)
+    else:
+        Eerr = Eerr_stat
 
     x = one_minus_cos_theta(theta)
     y, yerr = inverse_with_error(E, Eerr)
@@ -1072,7 +1121,11 @@ def make_inverse_scatter_energy_plot(cs_energies, output_dir="plots",
     y_theory = (1.0 / incident_energy_keV) + (1.0 / electron_rest_energy_keV) * x_theory
 
     fig, ax = plt.subplots()
-    ax.errorbar(x, y, yerr=yerr, fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8, label="Measured data")
+    ax.errorbar(
+        x, y, yerr=yerr,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured data"
+    )
     ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
 
     textbox = (
@@ -1086,17 +1139,22 @@ def make_inverse_scatter_energy_plot(cs_energies, output_dir="plots",
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
     )
 
-    ax.set_xlabel(r"$1-\cos\theta$")
+    ax.set_xlabel(r"$1-\cos\theta$ [dimensionless]")
     ax.set_ylabel(r"$1/E_{\mathrm{scatter}}$ [keV$^{-1}$]")
     ax.set_title(r"Inverse scattered-photon energy vs $1-\cos\theta$")
     ax.legend(loc="best")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "inverse_scatter_energy_vs_one_minus_cos.png"), dpi=200)
+    plt.savefig(os.path.join(output_dir, filename), dpi=200)
     plt.close(fig)
 
-def make_inverse_recoil_energy_plot(cs_energies, output_dir="plots",
-                                    incident_energy_keV=CS137_ENERGY_KEV,
-                                    electron_rest_energy_keV=ELECTRON_REST_ENERGY_KEV):
+def make_inverse_recoil_energy_plot(
+    cs_energies,
+    output_dir="plots",
+    incident_energy_keV=CS137_ENERGY_KEV,
+    electron_rest_energy_keV=ELECTRON_REST_ENERGY_KEV,
+    systematic_summary=None,
+    filename="inverse_recoil_energy_vs_inv_one_minus_cos.png"
+):
     recoil = sorted([c for c in cs_energies if c.spec_type == "recoil"], key=lambda x: x.angle)
     if len(recoil) == 0:
         print("[WARN] No recoil energies available for inverse recoil-energy plot.")
@@ -1104,10 +1162,20 @@ def make_inverse_recoil_energy_plot(cs_energies, output_dir="plots",
 
     theta = np.array([c.angle for c in recoil], dtype=float)
     T = np.array([c.energy_keV for c in recoil], dtype=float)
-    Terr = np.array([c.energy_err_keV for c in recoil], dtype=float)
+    Terr_stat = np.array([c.energy_err_keV for c in recoil], dtype=float)
+
+    if systematic_summary is not None:
+        Terr_sys = np.array([
+            get_angle_systematic(systematic_summary.get("recoil_by_angle", None), ang)
+            for ang in theta
+        ], dtype=float)
+        _, Terr = combine_point_stat_and_sys(T, Terr_stat, Terr_sys)
+    else:
+        Terr = Terr_stat
 
     x_raw = one_minus_cos_theta(theta)
     valid = x_raw > 0
+
     theta = theta[valid]
     T = T[valid]
     Terr = Terr[valid]
@@ -1122,7 +1190,11 @@ def make_inverse_recoil_energy_plot(cs_energies, output_dir="plots",
     y_theory = (1.0 / incident_energy_keV) + (electron_rest_energy_keV / incident_energy_keV**2) * x_theory
 
     fig, ax = plt.subplots()
-    ax.errorbar(x, y, yerr=yerr, fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8, label="Measured data")
+    ax.errorbar(
+        x, y, yerr=yerr,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured data"
+    )
     ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
 
     textbox = (
@@ -1136,12 +1208,12 @@ def make_inverse_recoil_energy_plot(cs_energies, output_dir="plots",
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
     )
 
-    ax.set_xlabel(r"$1/(1-\cos\theta)$")
+    ax.set_xlabel(r"$1/(1-\cos\theta)$ [dimensionless]")
     ax.set_ylabel(r"$1/E_{\mathrm{recoil}}$ [keV$^{-1}$]")
     ax.set_title(r"Inverse recoil-electron energy vs $1/(1-\cos\theta)$")
     ax.legend(loc="best")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "inverse_recoil_energy_vs_inv_one_minus_cos.png"), dpi=200)
+    plt.savefig(os.path.join(output_dir, filename), dpi=200)
     plt.close(fig)
 
 # ============================================================
@@ -1586,24 +1658,90 @@ def run_systematic_study(
 
     return systematic_runs
 
+def get_angle_systematic(sys_dict, angle):
+    """
+    Fetch systematic uncertainty for a given angle from a dictionary like:
+        sys_summary["scatter_by_angle"]
+        sys_summary["recoil_by_angle"]
+        sys_summary["sum_by_angle"]
+    """
+    if sys_dict is None:
+        return np.nan
+    if angle not in sys_dict:
+        return np.nan
+    return sys_dict[angle]["systematic_err_keV"]
+
+def combine_point_stat_and_sys(values, stat_errs, sys_errs):
+    """
+    Combine point-by-point statistical and systematic uncertainties in quadrature.
+    """
+    values = np.asarray(values, dtype=float)
+    stat_errs = np.asarray(stat_errs, dtype=float)
+    sys_errs = np.asarray(sys_errs, dtype=float)
+
+    total_errs = np.full_like(stat_errs, np.nan, dtype=float)
+    for i in range(len(stat_errs)):
+        total_errs[i] = combine_stat_and_sys(stat_errs[i], sys_errs[i])
+
+    return values, total_errs
+
 def summarize_systematics(systematic_runs):
+    """
+    Estimate systematic uncertainty from the spread across analysis variations for:
+      - scatter energy by angle
+      - recoil energy by angle
+      - sum energy by angle
+      - mean including 310
+      - mean excluding 310
+    """
     if len(systematic_runs) == 0:
         return None
 
-    values_by_angle = {}
-    for run in systematic_runs:
-        for _, angle, _, _, Etot, _ in run["result"]["energy_sums"]:
-            values_by_angle.setdefault(angle, []).append(Etot)
+    scatter_by_angle = {}
+    recoil_by_angle = {}
+    sum_by_angle = {}
 
-    angle_systematics = {}
-    for angle, vals in values_by_angle.items():
-        angle_systematics[angle] = {
+    for run in systematic_runs:
+        result = run["result"]
+
+        # Scatter / recoil energies
+        for c in result["cs_energies"]:
+            if c.spec_type == "scatter":
+                scatter_by_angle.setdefault(c.angle, []).append(c.energy_keV)
+            elif c.spec_type == "recoil":
+                recoil_by_angle.setdefault(c.angle, []).append(c.energy_keV)
+
+        # Sums
+        for _, angle, _, _, Etot, _ in result["energy_sums"]:
+            sum_by_angle.setdefault(angle, []).append(Etot)
+
+    scatter_systematics = {
+        angle: {
             "values_keV": vals,
             "systematic_err_keV": systematic_uncertainty_from_variations(vals)
         }
+        for angle, vals in scatter_by_angle.items()
+    }
+
+    recoil_systematics = {
+        angle: {
+            "values_keV": vals,
+            "systematic_err_keV": systematic_uncertainty_from_variations(vals)
+        }
+        for angle, vals in recoil_by_angle.items()
+    }
+
+    sum_systematics = {
+        angle: {
+            "values_keV": vals,
+            "systematic_err_keV": systematic_uncertainty_from_variations(vals)
+        }
+        for angle, vals in sum_by_angle.items()
+    }
 
     mean_all_vals = []
     mean_no_310_vals = []
+
     for run in systematic_runs:
         mr = run["result"]["mean_results"]
         if mr is None:
@@ -1614,7 +1752,9 @@ def summarize_systematics(systematic_runs):
             mean_no_310_vals.append(mr["excluding_310"]["mean_keV"])
 
     return {
-        "by_angle": angle_systematics,
+        "scatter_by_angle": scatter_systematics,
+        "recoil_by_angle": recoil_systematics,
+        "sum_by_angle": sum_systematics,
         "mean_including_310_systematic_keV": systematic_uncertainty_from_variations(mean_all_vals),
         "mean_excluding_310_systematic_keV": systematic_uncertainty_from_variations(mean_no_310_vals),
         "mean_including_310_values_keV": mean_all_vals,
@@ -1683,5 +1823,27 @@ if __name__ == "__main__":
                 print(f"  statistical = {stat_no:.2f} keV")
                 print(f"  systematic  = {sys_no:.2f} keV")
                 print(f"  total       = {tot_no:.2f} keV")
+
+            # Remake plots including systematic uncertainties in point error bars
+            make_energy_sum_plot(
+                results["energy_sums"],
+                output_dir=OUTPUT_DIR,
+                filename="energy_sum_vs_angle_with_systematics.png",
+                systematic_summary=sys_summary
+            )
+
+            make_inverse_scatter_energy_plot(
+                cs_energies=results["cs_energies"],
+                output_dir=OUTPUT_DIR,
+                systematic_summary=sys_summary,
+                filename="inverse_scatter_energy_vs_one_minus_cos_with_systematics.png"
+            )
+
+            make_inverse_recoil_energy_plot(
+                cs_energies=results["cs_energies"],
+                output_dir=OUTPUT_DIR,
+                systematic_summary=sys_summary,
+                filename="inverse_recoil_energy_vs_inv_one_minus_cos_with_systematics.png"
+            )
 
     print_uncertainty_budget(results, sys_summary)
