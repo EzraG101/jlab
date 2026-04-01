@@ -2,7 +2,8 @@ import os
 import re
 import math
 import glob
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 import numpy as np
@@ -37,15 +38,35 @@ CGRAY = "#7F7F7F"
 
 # ============================================================
 # User-configurable known source energies (keV)
-# Adjust as needed depending on which peaks you expect to use.
+# Keep only peaks you realistically expect to use.
 # ============================================================
 
 KNOWN_PEAKS_KEV = {
-    "Na22": np.array([511.0, 1274.537]),  # common visible peaks
-    # Common Ba133 gamma/X-ray lines; use subset depending on your detector/spectrum
+    "Na22": np.array([511.0, 1274.537]),
     "Ba133": np.array([81.0, 276.4, 302.85, 356.01, 383.85]),
-    "Cs137": np.array([661.657]),  # not for calibration, but useful sanity check
+    "Cs137": np.array([661.657]),
 }
+
+# ============================================================
+# Optional low-bin cutoffs to suppress low-energy noise
+# Values are in REBINNED bins (1024-bin spectra).
+# Add/edit entries as needed.
+# ============================================================
+
+LOW_BIN_CUTOFFS = {
+    ("03-10", "Na22", "scatter"): 80,
+    # Add more if needed, e.g.
+    # ("03-10", "Ba133", "scatter"): 40,
+    # ("03-11", "Cs137", "recoil"): 20,
+}
+
+def get_low_bin_cutoff(
+    date: str,
+    source: str,
+    spec_type: str,
+    angle: Optional[float] = None
+) -> int:
+    return LOW_BIN_CUTOFFS.get((date, source, spec_type), 0)
 
 # ============================================================
 # Data containers
@@ -57,7 +78,7 @@ class Spectrum:
     filename: str
     date: str
     source: str
-    spec_type: str  # scatter or recoil
+    spec_type: str
     angle: Optional[float]
     counts_raw: np.ndarray
     counts: np.ndarray
@@ -86,8 +107,8 @@ class PeakFitResult:
 class CalibrationResult:
     date: str
     spec_type: str
-    slope: float             # keV / bin
-    intercept: float         # keV
+    slope: float
+    intercept: float
     slope_err: float
     intercept_err: float
     cov: np.ndarray
@@ -110,6 +131,16 @@ class CsPeakEnergy:
     chi2_val: float
     p_value: float
     note: str = ""
+
+# ============================================================
+# Utility helpers
+# ============================================================
+
+def sanitize_filename(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_\-]+", "_", s.strip())
+
+def poisson_errors(counts: np.ndarray):
+    return np.sqrt(np.maximum(counts, 1.0))
 
 # ============================================================
 # File reading and parsing
@@ -163,7 +194,6 @@ def read_spe_file(filepath: str) -> np.ndarray:
     if data_start is None:
         raise ValueError(f"Could not find $DATA section in {filepath}")
 
-    # In many .Spe files, next line is channel start/end like "0 2047"
     counts = []
     started_numbers = False
     for line in lines[data_start + 1:]:
@@ -173,10 +203,8 @@ def read_spe_file(filepath: str) -> np.ndarray:
             continue
 
         parts = line.split()
-        # Detect "0 2047" line or count lines
-        # Once we begin reading numbers, interpret them as counts
+
         if len(parts) == 2 and not started_numbers:
-            # likely channel bounds, skip
             try:
                 int(parts[0]); int(parts[1])
                 continue
@@ -184,7 +212,6 @@ def read_spe_file(filepath: str) -> np.ndarray:
                 pass
 
         try:
-            # ORTEC usually has one integer count per line
             val = float(parts[0])
             counts.append(val)
             started_numbers = True
@@ -208,7 +235,6 @@ def load_all_spectra(data_dir: str) -> List[Spectrum]:
         counts_raw = read_spe_file(filepath)
         bins_raw = np.arange(len(counts_raw), dtype=float)
 
-        # Rebin 2048 -> 1024 if applicable
         if len(counts_raw) == 2048:
             counts = rebin_counts(counts_raw, factor=2)
         elif len(counts_raw) == 1024:
@@ -253,10 +279,6 @@ def weighted_linear(x, m, b):
     return m * x + b
 
 def fit_weighted_linear(x, y, yerr):
-    """
-    Fit y = m x + b with weighting by yerr.
-    Returns m, b, covariance, chi2, ndof, p.
-    """
     popt, pcov = curve_fit(weighted_linear, x, y, sigma=yerr, absolute_sigma=True)
     yfit = weighted_linear(x, *popt)
     chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr, 2)
@@ -265,10 +287,6 @@ def fit_weighted_linear(x, y, yerr):
 # ============================================================
 # Peak finding and fitting
 # ============================================================
-
-def poisson_errors(counts: np.ndarray):
-    # Conservative nonzero error
-    return np.sqrt(np.maximum(counts, 1.0))
 
 def find_and_fit_peaks(
     bins: np.ndarray,
@@ -281,74 +299,93 @@ def find_and_fit_peaks(
     fit_half_width: int = 12,
     max_peaks: int = 10,
     source_hint: Optional[str] = None,
+    min_bin: int = 0,
 ):
     """
-    1) Find candidate peaks.
-    2) Fit each candidate with Gaussian + linear background in a local window.
-    3) Return fit results.
+    Find candidate peaks, fit each with Gaussian + linear background,
+    and generate diagnostic plots.
 
-    Generates:
-      - candidate overview plot
-      - zoom plots for each fit
-      - final peak plot
+    min_bin trims off low-bin noise when searching/fitting peaks.
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    if prominence is None:
-        prominence = max(5.0, 0.03 * np.max(counts))
-    if height is None:
-        height = max(5.0, 0.05 * np.max(counts))
+    mask = bins >= min_bin
+    bins_use = bins[mask]
+    counts_use = counts[mask]
 
-    peak_indices, properties = find_peaks(
-        counts,
+    if len(bins_use) == 0:
+        raise ValueError(f"No bins remain after applying min_bin={min_bin}")
+
+    if prominence is None:
+        prominence = max(5.0, 0.03 * np.max(counts_use))
+    if height is None:
+        height = max(5.0, 0.05 * np.max(counts_use))
+
+    peak_indices_local, properties = find_peaks(
+        counts_use,
         prominence=prominence,
         height=height,
         distance=distance
     )
 
-    # If too many, keep strongest by prominence
-    if len(peak_indices) > max_peaks:
+    if len(peak_indices_local) > max_peaks:
         prominences = properties["prominences"]
         order = np.argsort(prominences)[::-1][:max_peaks]
-        peak_indices = peak_indices[order]
-        peak_indices = np.sort(peak_indices)
+        peak_indices_local = peak_indices_local[order]
+        peak_indices_local = np.sort(peak_indices_local)
 
-    # --- Plot candidate peaks and fit windows
+    # Candidate overview plot
     fig, ax = plt.subplots()
-    ax.bar(bins, counts, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
-    ax.plot(bins[peak_indices], counts[peak_indices], 'o', color=CRED, markersize=8, label="Peak candidates")
+    ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
 
-    for p in peak_indices:
-        left = max(0, p - fit_half_width)
-        right = min(len(bins) - 1, p + fit_half_width)
-        ax.axvspan(left, right, color=CORANGE, alpha=0.15)
+    if len(peak_indices_local) > 0:
+        ax.plot(
+            bins_use[peak_indices_local],
+            counts_use[peak_indices_local],
+            'o',
+            color=CRED,
+            markersize=8,
+            label="Peak candidates"
+        )
+
+        for p in peak_indices_local:
+            left = max(0, p - fit_half_width)
+            right = min(len(bins_use) - 1, p + fit_half_width)
+            ax.axvspan(bins_use[left], bins_use[right], color=CORANGE, alpha=0.15)
 
     ax.set_xlabel("Bin")
     ax.set_ylabel("Counts")
     ax.set_title(f"{title_prefix} Peak candidates")
-    ax.legend(loc="best")
+    if min_bin > 0:
+        ax.text(
+            0.02, 0.95,
+            f"Low-bin cutoff applied: bin ≥ {min_bin}",
+            transform=ax.transAxes,
+            ha="left", va="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+        )
+    if len(peak_indices_local) > 0:
+        ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_peak_candidates.png"), dpi=200)
     plt.close(fig)
 
     fit_results = []
 
-    for i, p in enumerate(peak_indices):
+    for i, p in enumerate(peak_indices_local):
         left = max(0, p - fit_half_width)
-        right = min(len(bins) - 1, p + fit_half_width)
+        right = min(len(bins_use) - 1, p + fit_half_width)
 
-        xfit = bins[left:right+1]
-        yfit = counts[left:right+1]
+        xfit = bins_use[left:right+1]
+        yfit = counts_use[left:right+1]
         yerr = poisson_errors(yfit)
 
-        # Initial guesses
         A0 = max(yfit) - np.median(yfit)
-        mu0 = bins[p]
+        mu0 = bins_use[p]
         sigma0 = max(1.5, fit_half_width / 4)
         b00 = np.median(yfit)
         b10 = 0.0
 
-        # Bounds
         lower = [0, xfit.min(), 0.5, -np.inf, -np.inf]
         upper = [np.inf, xfit.max(), fit_half_width, np.inf, np.inf]
 
@@ -374,10 +411,9 @@ def find_and_fit_peaks(
             chi2_val = np.nan
             ndof = len(xfit) - 5
             p_value = np.nan
-            model = np.full_like(xfit, np.nan, dtype=float)
 
         result = PeakFitResult(
-            candidate_bin=bins[p],
+            candidate_bin=bins_use[p],
             fit_center=popt[1],
             fit_center_err=perr[1],
             sigma=popt[2],
@@ -389,15 +425,16 @@ def find_and_fit_peaks(
             chi2_val=chi2_val,
             ndof=ndof,
             p_value=p_value,
-            fit_range=(left, right),
+            fit_range=(int(xfit.min()), int(xfit.max())),
             success=success,
             covariance=pcov
         )
         fit_results.append(result)
 
-        # --- Plot local fit
+        # Local fit plot
         fig, ax = plt.subplots()
         ax.bar(xfit, yfit, width=1.0, color=CBLUE, edgecolor=None, linewidth=0, label="Data")
+
         if success:
             xdense = np.linspace(xfit.min(), xfit.max(), 400)
             ax.plot(xdense, gaussian_plus_linear(xdense, *popt), color=CRED, lw=2.5, label="Gaussian + linear fit")
@@ -429,14 +466,35 @@ def find_and_fit_peaks(
         plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_candidate_{i+1}_fit.png"), dpi=200)
         plt.close(fig)
 
-    # --- Final peak plot
+    # Final fitted-peaks plot
     fig, ax = plt.subplots()
-    ax.bar(bins, counts, width=1.0, color=CBLUE, edgecolor=None, linewidth=0, label="Histogram")
+    ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0, label="Histogram")
 
     valid_results = [r for r in fit_results if r.success]
-    for r in valid_results:
+    valid_results = sorted(valid_results, key=lambda r: r.fit_center)
+    for i, r in enumerate(valid_results):
+        yval = np.interp(r.fit_center, bins_use, counts_use)
         ax.axvline(r.fit_center, color=CRED, lw=2)
-        ax.plot(r.fit_center, np.interp(r.fit_center, bins, counts), 'o', color=CRED, markersize=8)
+        ax.plot(r.fit_center, yval, 'o', color=CRED, markersize=8)
+        ax.text(
+            r.fit_center,
+            yval + 0.03 * np.max(counts_use),
+            f"{i}",
+            color=CBLACK,
+            ha="center",
+            va="bottom",
+            fontsize=13,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none")
+        )
+
+    if min_bin > 0:
+        ax.text(
+            0.02, 0.95,
+            f"Low-bin cutoff applied: bin ≥ {min_bin}",
+            transform=ax.transAxes,
+            ha="left", va="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+        )
 
     ax.set_xlabel("Bin")
     ax.set_ylabel("Counts")
@@ -447,97 +505,283 @@ def find_and_fit_peaks(
 
     return fit_results
 
-def sanitize_filename(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_\-]+", "_", s.strip())
-
 # ============================================================
-# Calibration helpers
+# Manual matching for calibration peaks
 # ============================================================
 
-def select_calibration_peaks(
+def manual_match_calibration_peaks(
     source: str,
     fit_results: List[PeakFitResult],
     known_energies: np.ndarray
 ):
     """
-    Match found peaks to known calibration energies.
-    Since your spectra have well-separated peaks and not too many peaks,
-    this uses a simple rule:
-      - sort found peaks by bin position
-      - sort known energies by energy
-      - take the same number from each, truncated to min length
-
-    If you want, later we can replace this with a manual peak assignment step.
+    Interactively match fitted peaks to known source energies.
+    Allows one or more matched peaks from a source.
     """
     valid = [r for r in fit_results if r.success]
     valid = sorted(valid, key=lambda r: r.fit_center)
-    known = np.sort(np.array(known_energies, dtype=float))
 
-    n = min(len(valid), len(known))
-    if n < 2:
-        raise ValueError(f"Need at least 2 matched peaks to calibrate {source}, but got {n}")
+    if len(valid) == 0:
+        raise ValueError(f"No successful fitted peaks available for {source}")
 
-    peak_bins = np.array([r.fit_center for r in valid[:n]])
-    peak_bin_errs = np.array([r.fit_center_err for r in valid[:n]])
-    energies = known[:n]
+    print("\n" + "=" * 70)
+    print(f"Manual peak matching for {source}")
+    print("=" * 70)
+
+    print("\nSuccessful fitted peaks:")
+    for i, r in enumerate(valid):
+        print(
+            f"[{i}] bin = {r.fit_center:.2f} ± {r.fit_center_err:.2f}, "
+            f"sigma = {r.sigma:.2f} ± {r.sigma_err:.2f}, "
+            f"amplitude = {r.amplitude:.1f}, "
+            f"chi2/ndof = {r.chi2_val:.2f}/{r.ndof}, p = {r.p_value:.3f}"
+        )
+
+    print("\nKnown energies for this source:")
+    for i, E in enumerate(known_energies):
+        print(f"[{i}] {E:.3f} keV")
+
+    print("\nEnter matches as:")
+    print("    peak_index energy_index")
+    print("one per line. Press Enter on a blank line when done.")
+    print("Example:")
+    print("    0 1")
+    print("    2 3")
+
+    selected_peak_bins = []
+    selected_peak_bin_errs = []
+    selected_energies = []
+
+    used_peak_indices = set()
+    used_energy_indices = set()
+
+    while True:
+        entry = input("match> ").strip()
+        if entry == "":
+            break
+
+        parts = entry.split()
+        if len(parts) != 2:
+            print("Please enter exactly two integers: peak_index energy_index")
+            continue
+
+        try:
+            pidx = int(parts[0])
+            eidx = int(parts[1])
+        except ValueError:
+            print("Indices must be integers.")
+            continue
+
+        if pidx < 0 or pidx >= len(valid):
+            print("Invalid peak index.")
+            continue
+        if eidx < 0 or eidx >= len(known_energies):
+            print("Invalid energy index.")
+            continue
+        if pidx in used_peak_indices:
+            print("That peak index has already been used.")
+            continue
+        if eidx in used_energy_indices:
+            print("That energy index has already been used.")
+            continue
+
+        used_peak_indices.add(pidx)
+        used_energy_indices.add(eidx)
+
+        selected_peak_bins.append(valid[pidx].fit_center)
+        selected_peak_bin_errs.append(valid[pidx].fit_center_err)
+        selected_energies.append(float(known_energies[eidx]))
+
+        print(
+            f"Accepted: peak {pidx} -> "
+            f"{valid[pidx].fit_center:.2f} ± {valid[pidx].fit_center_err:.2f} bins "
+            f"matched to {known_energies[eidx]:.3f} keV"
+        )
+
+    if len(selected_peak_bins) < 1:
+        raise ValueError(f"Need at least 1 matched peak for {source}")
+
+    peak_bins = np.array(selected_peak_bins, dtype=float)
+    peak_bin_errs = np.array(selected_peak_bin_errs, dtype=float)
+    energies = np.array(selected_energies, dtype=float)
+
+    order = np.argsort(peak_bins)
+    return peak_bins[order], peak_bin_errs[order], energies[order]
+
+def save_manual_matches(match_file, key, peak_bins, peak_bin_errs, energies):
+    if os.path.exists(match_file):
+        with open(match_file, "r") as f:
+            data = json.load(f)
+    else:
+        data = {}
+
+    data[key] = {
+        "peak_bins": np.asarray(peak_bins, dtype=float).tolist(),
+        "peak_bin_errs": np.asarray(peak_bin_errs, dtype=float).tolist(),
+        "energies": np.asarray(energies, dtype=float).tolist(),
+    }
+
+    with open(match_file, "w") as f:
+        json.dump(data, f, indent=2)
+
+def load_manual_matches(match_file, key):
+    if not os.path.exists(match_file):
+        raise FileNotFoundError(f"Manual match file not found: {match_file}")
+
+    with open(match_file, "r") as f:
+        data = json.load(f)
+
+    if key not in data:
+        raise KeyError(f"No saved manual matches found for key: {key}")
+
+    entry = data[key]
+
+    peak_bins = np.array(entry["peak_bins"], dtype=float)
+    peak_bin_errs = np.array(entry["peak_bin_errs"], dtype=float)
+    energies = np.array(entry["energies"], dtype=float)
+
+    if not (len(peak_bins) == len(peak_bin_errs) == len(energies)):
+        raise ValueError(f"Saved match data for {key} has inconsistent array lengths")
+
+    if len(peak_bins) < 1:
+        raise ValueError(f"Saved match data for {key} has fewer than 1 matched peak")
 
     return peak_bins, peak_bin_errs, energies
+
+def get_manual_matches(
+    match_file,
+    key,
+    source,
+    fit_results,
+    known_energies,
+    force_rematch=False
+):
+    if (not force_rematch) and os.path.exists(match_file):
+        try:
+            peak_bins, peak_bin_errs, energies = load_manual_matches(match_file, key)
+            print(f"[INFO] Loaded saved manual matches for {key}")
+            return peak_bins, peak_bin_errs, energies
+        except KeyError:
+            pass
+        except ValueError as e:
+            print(f"[WARN] Saved matches for {key} are invalid: {e}")
+        except Exception as e:
+            print(f"[WARN] Could not load saved matches for {key}: {e}")
+
+    print(f"[INFO] No saved matches for {key}; entering interactive matching.")
+    peak_bins, peak_bin_errs, energies = manual_match_calibration_peaks(
+        source=source,
+        fit_results=fit_results,
+        known_energies=known_energies
+    )
+
+    save_manual_matches(match_file, key, peak_bins, peak_bin_errs, energies)
+    print(f"[INFO] Saved manual matches for {key}")
+
+    return peak_bins, peak_bin_errs, energies
+
+# ============================================================
+# Calibration helpers
+# ============================================================
 
 def calibrate_day_type(
     date: str,
     spec_type: str,
     source_peak_results: Dict[str, List[PeakFitResult]],
     output_dir: str = "plots",
-    known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV
+    known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV,
+    interactive: bool = True,
+    match_file: str = "manual_matches.json",
+    force_rematch: bool = False
 ) -> CalibrationResult:
     """
-    Build calibration using Na22 + Ba133 for one day and one type.
-    Fits energy = slope * bin + intercept.
+    Build one combined calibration using Na22 + Ba133 for one day and one type.
+    Each source may contribute one or more matched peaks.
+    Need at least two total matched points across both sources.
     """
-    bins_all = []
-    bin_errs_all = []
-    energies_all = []
+    bins_list = []
+    bin_errs_list = []
+    energies_list = []
+
+    print("\n" + "#" * 80)
+    print(f"Calibration setup for date={date}, type={spec_type}")
+    print("#" * 80)
 
     for source in ["Ba133", "Na22"]:
         if source not in source_peak_results:
+            print(f"[WARN] No peak results found for {date} {spec_type} {source}")
             continue
-        peak_bins, peak_bin_errs, energies = select_calibration_peaks(
-            source,
-            source_peak_results[source],
-            known_peaks_dict[source]
+
+        try:
+            if interactive:
+                key = f"{date}_{spec_type}_{source}"
+                peak_bins, peak_bin_errs, energies = get_manual_matches(
+                    match_file=match_file,
+                    key=key,
+                    source=source,
+                    fit_results=source_peak_results[source],
+                    known_energies=known_peaks_dict[source],
+                    force_rematch=force_rematch
+                )
+            else:
+                raise ValueError("This version expects interactive/manual matching.")
+
+            bins_list.append(peak_bins)
+            bin_errs_list.append(peak_bin_errs)
+            energies_list.append(energies)
+
+            print(f"[INFO] Using {len(peak_bins)} matched peaks from {source}")
+
+        except ValueError as e:
+            print(f"[WARN] Skipping {source} for {date} {spec_type}: {e}")
+        except Exception as e:
+            print(f"[WARN] Unexpected issue with {source} for {date} {spec_type}: {e}")
+
+    if len(bins_list) == 0:
+        raise ValueError(f"No usable calibration source peaks found for {date} {spec_type}")
+
+    bins_all = np.concatenate(bins_list)
+    bin_errs_all = np.concatenate(bin_errs_list)
+    energies_all = np.concatenate(energies_list)
+
+    if len(bins_all) < 2:
+        raise ValueError(
+            f"Need at least two total matched calibration peaks for {date} {spec_type}; "
+            f"got only {len(bins_all)}"
         )
-        bins_all.append(peak_bins)
-        bin_errs_all.append(peak_bin_errs)
-        energies_all.append(energies)
 
-    if len(bins_all) == 0:
-        raise ValueError(f"No calibration source peaks found for {date} {spec_type}")
-
-    bins_all = np.concatenate(bins_all)
-    bin_errs_all = np.concatenate(bin_errs_all)
-    energies_all = np.concatenate(energies_all)
-
-    # Since x-errors exist (bin errors), a rigorous treatment would use ODR.
-    # For now, propagate x-errors into y-errors using an iterative slope estimate.
-    # First rough linear fit with uniform uncertainties:
     p0 = np.polyfit(bins_all, energies_all, 1)
     slope0, intercept0 = p0[0], p0[1]
 
-    yerr_eff = np.maximum(np.abs(slope0) * bin_errs_all, 0.5)  # keV
-    popt, pcov, chi2_val, ndof, p_value = fit_weighted_linear(bins_all, energies_all, yerr_eff)
+    yerr_eff = np.maximum(np.abs(slope0) * bin_errs_all, 0.5)
+
+    popt, pcov, chi2_val, ndof, p_value = fit_weighted_linear(
+        bins_all, energies_all, yerr_eff
+    )
     slope, intercept = popt
     perr = np.sqrt(np.diag(pcov))
 
-    # Plot calibration
     fig, ax = plt.subplots()
     ax.errorbar(
-        bins_all, energies_all,
-        xerr=bin_errs_all, yerr=np.abs(slope) * bin_errs_all,
-        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=3, label="Calibration peaks"
+        bins_all,
+        energies_all,
+        xerr=bin_errs_all,
+        yerr=np.abs(slope) * bin_errs_all,
+        fmt='o',
+        color=CBLUE,
+        ecolor=CBLUE,
+        capsize=3,
+        label="Selected calibration peaks"
     )
 
     xdense = np.linspace(0, max(1050, 1.05 * np.max(bins_all)), 400)
-    ax.plot(xdense, weighted_linear(xdense, slope, intercept), color=CRED, lw=2.5, label="Linear calibration fit")
+    ax.plot(
+        xdense,
+        weighted_linear(xdense, slope, intercept),
+        color=CRED,
+        lw=2.5,
+        label="Linear fit"
+    )
 
     textbox = (
         f"$E = m b + c$\n"
@@ -547,14 +791,18 @@ def calibrate_day_type(
         f"$p$ = {p_value:.3f}"
     )
     ax.text(
-        0.98, 0.05, textbox, transform=ax.transAxes,
-        ha="right", va="bottom",
+        0.98,
+        0.05,
+        textbox,
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
     )
 
     ax.set_xlabel("Peak location [bin]")
     ax.set_ylabel("Energy [keV]")
-    ax.set_title(f"Calibration: {date} {spec_type}")
+    ax.set_title(f"Calibration: {date} {spec_type} (Na22 + Ba133)")
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"calibration_{date}_{spec_type}.png"), dpi=200)
@@ -579,7 +827,7 @@ def calibrate_day_type(
 def bin_to_energy(bin_value: float, bin_err: float, cal: CalibrationResult):
     """
     E = m b + c
-    var(E) = (b^2 var(m) + var(c) + m^2 var(b) + 2 b cov(m,c))
+    var(E) = b^2 var(m) + var(c) + m^2 var(b) + 2 b cov(m,c)
     """
     E = cal.slope * bin_value + cal.intercept
     varE = (
@@ -599,14 +847,8 @@ def choose_cs137_peak(
     spec_type: str
 ) -> Tuple[PeakFitResult, Optional[PeakFitResult]]:
     """
-    For scatter:
-      choose the strongest/most obvious valid peak, typically only one.
-
-    For recoil:
-      often two peaks, and the higher-energy one is the unwanted direct-photon peak.
-      We return:
-         desired_peak = lower-bin peak
-         sanity_peak  = highest-bin peak (if present)
+    For scatter: choose strongest valid peak.
+    For recoil: choose lower-bin peak as desired, highest-bin peak as sanity check.
     """
     valid = [r for r in fit_results if r.success]
     if len(valid) == 0:
@@ -616,15 +858,11 @@ def choose_cs137_peak(
     valid_sorted_amp = sorted(valid, key=lambda r: r.amplitude, reverse=True)
 
     if spec_type == "scatter":
-        # choose strongest amplitude peak
         return valid_sorted_amp[0], None
-
     elif spec_type == "recoil":
         if len(valid_sorted_bin) == 1:
             return valid_sorted_bin[0], None
-        # desired = lower-energy/lower-bin peak, sanity = highest-bin peak
         return valid_sorted_bin[0], valid_sorted_bin[-1]
-
     else:
         raise ValueError(f"Unknown spec_type: {spec_type}")
 
@@ -635,21 +873,19 @@ def choose_cs137_peak(
 def analyze_compton_data(
     data_dir: str,
     output_dir: str = "plots",
-    known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV
+    known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV,
+    match_file: str = "manual_matches.json",
+    force_rematch: bool = False
 ):
     os.makedirs(output_dir, exist_ok=True)
 
     spectra = load_all_spectra(data_dir)
 
-    # Organize by date and type
     by_date_type_source: Dict[Tuple[str, str, str], List[Spectrum]] = {}
     for sp in spectra:
         key = (sp.date, sp.spec_type, sp.source)
         by_date_type_source.setdefault(key, []).append(sp)
 
-    # --------------------------------------------------------
-    # 1) Fit peaks in calibration spectra and build calibrations
-    # --------------------------------------------------------
     calibrations: Dict[Tuple[str, str], CalibrationResult] = {}
 
     all_dates = sorted(set(sp.date for sp in spectra))
@@ -662,15 +898,22 @@ def analyze_compton_data(
                 if key not in by_date_type_source:
                     continue
 
-                # Usually there should be one calibration file per date/type/source
-                # If there are multiple, analyze first for now.
                 sp = by_date_type_source[key][0]
+
+                min_bin = get_low_bin_cutoff(
+                    date=sp.date,
+                    source=sp.source,
+                    spec_type=sp.spec_type,
+                    angle=sp.angle
+                )
+
                 peak_results = find_and_fit_peaks(
                     sp.bins,
                     sp.counts,
                     title_prefix=f"{date}_{source}_{spec_type}",
                     output_dir=output_dir,
-                    source_hint=source
+                    source_hint=source,
+                    min_bin=min_bin
                 )
                 source_peak_results[source] = peak_results
 
@@ -681,7 +924,10 @@ def analyze_compton_data(
                         spec_type=spec_type,
                         source_peak_results=source_peak_results,
                         output_dir=output_dir,
-                        known_peaks_dict=known_peaks_dict
+                        known_peaks_dict=known_peaks_dict,
+                        interactive=True,
+                        match_file=match_file,
+                        force_rematch=force_rematch
                     )
                     calibrations[(date, spec_type)] = cal
                     print(f"[OK] Calibration built for {date} {spec_type}")
@@ -689,9 +935,6 @@ def analyze_compton_data(
                 except Exception as e:
                     print(f"[WARN] Could not calibrate {date} {spec_type}: {e}")
 
-    # --------------------------------------------------------
-    # 2) Analyze Cs137 spectra
-    # --------------------------------------------------------
     cs_energies: List[CsPeakEnergy] = []
     cs_sanity: List[CsPeakEnergy] = []
 
@@ -706,12 +949,20 @@ def analyze_compton_data(
 
         cal = calibrations[cal_key]
 
+        min_bin = get_low_bin_cutoff(
+            date=sp.date,
+            source=sp.source,
+            spec_type=sp.spec_type,
+            angle=sp.angle
+        )
+
         peak_results = find_and_fit_peaks(
             sp.bins,
             sp.counts,
             title_prefix=f"{sp.date}_{sp.source}_{sp.spec_type}_{sp.angle}",
             output_dir=output_dir,
-            source_hint="Cs137"
+            source_hint="Cs137",
+            min_bin=min_bin
         )
 
         try:
@@ -749,10 +1000,6 @@ def analyze_compton_data(
         except Exception as e:
             print(f"[WARN] Could not determine Cs137 peak for {sp.filename}: {e}")
 
-    # --------------------------------------------------------
-    # 3) Combine scatter and recoil by angle and plot energy sum
-    # --------------------------------------------------------
-    # Match by (date, angle)
     scatter_dict = {(c.date, c.angle): c for c in cs_energies if c.spec_type == "scatter"}
     recoil_dict = {(c.date, c.angle): c for c in cs_energies if c.spec_type == "recoil"}
 
@@ -782,9 +1029,6 @@ def analyze_compton_data(
         plt.savefig(os.path.join(output_dir, "energy_sum_vs_angle.png"), dpi=200)
         plt.close(fig)
 
-    # --------------------------------------------------------
-    # 4) Print summary tables
-    # --------------------------------------------------------
     print("\n=== Calibrations ===")
     for key, cal in calibrations.items():
         print(
@@ -833,11 +1077,14 @@ def analyze_compton_data(
 # ============================================================
 
 if __name__ == "__main__":
-    DATA_DIR = "data"       # <-- folder containing .Spe files
+    DATA_DIR = "data"                 # folder containing .Spe files
     OUTPUT_DIR = "plots"
+    MATCH_FILE = "manual_matches.json"
 
     results = analyze_compton_data(
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
-        known_peaks_dict=KNOWN_PEAKS_KEV
+        known_peaks_dict=KNOWN_PEAKS_KEV,
+        match_file=MATCH_FILE,
+        force_rematch=False
     )
