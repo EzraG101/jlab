@@ -300,12 +300,14 @@ def find_and_fit_peaks(
     max_peaks: int = 10,
     source_hint: Optional[str] = None,
     min_bin: int = 0,
+    calibration: Optional[CalibrationResult] = None,
 ):
     """
     Find candidate peaks, fit each with Gaussian + linear background,
     and generate diagnostic plots.
 
-    min_bin trims off low-bin noise when searching/fitting peaks.
+    If calibration is provided, plots use energy [keV] on the x-axis.
+    Fits are still performed in bin space.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -315,6 +317,13 @@ def find_and_fit_peaks(
 
     if len(bins_use) == 0:
         raise ValueError(f"No bins remain after applying min_bin={min_bin}")
+
+    if calibration is not None:
+        xplot_use = calibration.slope * bins_use + calibration.intercept
+        xlabel = "Energy [keV]"
+    else:
+        xplot_use = bins_use
+        xlabel = "Bin"
 
     if prominence is None:
         prominence = max(5.0, 0.03 * np.max(counts_use))
@@ -336,11 +345,12 @@ def find_and_fit_peaks(
 
     # Candidate overview plot
     fig, ax = plt.subplots()
-    ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+    ax.bar(xplot_use, counts_use, width=np.diff(xplot_use).mean() if len(xplot_use) > 1 else 1.0,
+           color=CBLUE, edgecolor=None, linewidth=0)
 
     if len(peak_indices_local) > 0:
         ax.plot(
-            bins_use[peak_indices_local],
+            xplot_use[peak_indices_local],
             counts_use[peak_indices_local],
             'o',
             color=CRED,
@@ -351,9 +361,9 @@ def find_and_fit_peaks(
         for p in peak_indices_local:
             left = max(0, p - fit_half_width)
             right = min(len(bins_use) - 1, p + fit_half_width)
-            ax.axvspan(bins_use[left], bins_use[right], color=CORANGE, alpha=0.15)
+            ax.axvspan(xplot_use[left], xplot_use[right], color=CORANGE, alpha=0.15)
 
-    ax.set_xlabel("Bin")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Counts")
     ax.set_title(f"{title_prefix} Peak candidates")
     if min_bin > 0:
@@ -379,6 +389,11 @@ def find_and_fit_peaks(
         xfit = bins_use[left:right+1]
         yfit = counts_use[left:right+1]
         yerr = poisson_errors(yfit)
+
+        if calibration is not None:
+            xfit_plot = calibration.slope * xfit + calibration.intercept
+        else:
+            xfit_plot = xfit
 
         A0 = max(yfit) - np.median(yfit)
         mu0 = bins_use[p]
@@ -431,17 +446,31 @@ def find_and_fit_peaks(
         )
         fit_results.append(result)
 
-        # Local fit plot
         fig, ax = plt.subplots()
-        ax.bar(xfit, yfit, width=1.0, color=CBLUE, edgecolor=None, linewidth=0, label="Data")
+        bar_width = np.diff(xfit_plot).mean() if len(xfit_plot) > 1 else 1.0
+        ax.bar(xfit_plot, yfit, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0, label="Data")
 
         if success:
             xdense = np.linspace(xfit.min(), xfit.max(), 400)
-            ax.plot(xdense, gaussian_plus_linear(xdense, *popt), color=CRED, lw=2.5, label="Gaussian + linear fit")
-            ax.axvline(popt[1], color=CGREEN, ls="--", lw=2, label=f"Peak = {popt[1]:.2f} ± {perr[1]:.2f} bins")
+            ydense = gaussian_plus_linear(xdense, *popt)
+
+            if calibration is not None:
+                xdense_plot = calibration.slope * xdense + calibration.intercept
+                peak_plot = calibration.slope * popt[1] + calibration.intercept
+                peak_plot_err = abs(calibration.slope) * perr[1]
+                unit = "keV"
+            else:
+                xdense_plot = xdense
+                peak_plot = popt[1]
+                peak_plot_err = perr[1]
+                unit = "bins"
+
+            ax.plot(xdense_plot, ydense, color=CRED, lw=2.5, label="Gaussian + linear fit")
+            ax.axvline(peak_plot, color=CGREEN, ls="--", lw=2,
+                       label=f"Peak = {peak_plot:.2f} ± {peak_plot_err:.2f} {unit}")
 
             textbox = (
-                f"$\\mu$ = {popt[1]:.2f} ± {perr[1]:.2f} bins\n"
+                f"$\\mu$ = {peak_plot:.2f} ± {peak_plot_err:.2f} {unit}\n"
                 f"$\\sigma$ = {popt[2]:.2f} ± {perr[2]:.2f} bins\n"
                 f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
                 f"$p$ = {p_value:.3f}"
@@ -458,7 +487,7 @@ def find_and_fit_peaks(
                 bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
             )
 
-        ax.set_xlabel("Bin")
+        ax.set_xlabel(xlabel)
         ax.set_ylabel("Counts")
         ax.set_title(f"{title_prefix} candidate {i+1} local fit")
         ax.legend(loc="best")
@@ -468,16 +497,22 @@ def find_and_fit_peaks(
 
     # Final fitted-peaks plot
     fig, ax = plt.subplots()
-    ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0, label="Histogram")
+    bar_width = np.diff(xplot_use).mean() if len(xplot_use) > 1 else 1.0
+    ax.bar(xplot_use, counts_use, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0, label="Histogram")
 
     valid_results = [r for r in fit_results if r.success]
     valid_results = sorted(valid_results, key=lambda r: r.fit_center)
     for i, r in enumerate(valid_results):
+        if calibration is not None:
+            xpeak = calibration.slope * r.fit_center + calibration.intercept
+        else:
+            xpeak = r.fit_center
+
         yval = np.interp(r.fit_center, bins_use, counts_use)
-        ax.axvline(r.fit_center, color=CRED, lw=2)
-        ax.plot(r.fit_center, yval, 'o', color=CRED, markersize=8)
+        ax.axvline(xpeak, color=CRED, lw=2)
+        ax.plot(xpeak, yval, 'o', color=CRED, markersize=8)
         ax.text(
-            r.fit_center,
+            xpeak,
             yval + 0.03 * np.max(counts_use),
             f"{i}",
             color=CBLACK,
@@ -496,7 +531,7 @@ def find_and_fit_peaks(
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
         )
 
-    ax.set_xlabel("Bin")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Counts")
     ax.set_title(f"{title_prefix} fitted peaks")
     plt.tight_layout()
@@ -844,27 +879,41 @@ def bin_to_energy(bin_value: float, bin_err: float, cal: CalibrationResult):
 
 def choose_cs137_peak(
     fit_results: List[PeakFitResult],
-    spec_type: str
+    bins: np.ndarray,
+    counts: np.ndarray,
+    spec_type: str,
+    min_bin: int = 0
 ) -> Tuple[PeakFitResult, Optional[PeakFitResult]]:
     """
-    For scatter: choose strongest valid peak.
-    For recoil: choose lower-bin peak as desired, highest-bin peak as sanity check.
+    Choose the Cs137 peak that is closest to the histogram maximum.
+    This is more robust than always taking the lowest-bin recoil peak.
+
+    For recoil, also return the highest-energy extra peak as a sanity check
+    if it is different from the chosen peak.
     """
     valid = [r for r in fit_results if r.success]
     if len(valid) == 0:
         raise ValueError("No successful peak fits for Cs137 spectrum")
 
-    valid_sorted_bin = sorted(valid, key=lambda r: r.fit_center)
-    valid_sorted_amp = sorted(valid, key=lambda r: r.amplitude, reverse=True)
+    mask = bins >= min_bin
+    bins_use = bins[mask]
+    counts_use = counts[mask]
 
-    if spec_type == "scatter":
-        return valid_sorted_amp[0], None
-    elif spec_type == "recoil":
-        if len(valid_sorted_bin) == 1:
-            return valid_sorted_bin[0], None
-        return valid_sorted_bin[0], valid_sorted_bin[-1]
-    else:
-        raise ValueError(f"Unknown spec_type: {spec_type}")
+    if len(bins_use) == 0:
+        raise ValueError("No bins remain after applying min_bin in choose_cs137_peak")
+
+    max_bin = bins_use[np.argmax(counts_use)]
+
+    # Choose the fitted peak closest to the histogram maximum
+    desired_peak = min(valid, key=lambda r: abs(r.fit_center - max_bin))
+
+    sanity_peak = None
+    if spec_type == "recoil" and len(valid) > 1:
+        highest_peak = max(valid, key=lambda r: r.fit_center)
+        if highest_peak is not desired_peak:
+            sanity_peak = highest_peak
+
+    return desired_peak, sanity_peak
 
 # ============================================================
 # Main analysis workflow
@@ -962,11 +1011,18 @@ def analyze_compton_data(
             title_prefix=f"{sp.date}_{sp.source}_{sp.spec_type}_{sp.angle}",
             output_dir=output_dir,
             source_hint="Cs137",
-            min_bin=min_bin
+            min_bin=min_bin,
+            calibration=cal
         )
 
         try:
-            desired_peak, sanity_peak = choose_cs137_peak(peak_results, sp.spec_type)
+            desired_peak, sanity_peak = choose_cs137_peak(
+                fit_results=peak_results,
+                bins=sp.bins,
+                counts=sp.counts,
+                spec_type=sp.spec_type,
+                min_bin=min_bin
+            )
             E, Eerr = bin_to_energy(desired_peak.fit_center, desired_peak.fit_center_err, cal)
 
             cs_energies.append(CsPeakEnergy(
