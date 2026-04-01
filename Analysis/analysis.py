@@ -20,7 +20,7 @@ plt.rcParams.update({
     "font.size": 16,
     "axes.labelsize": 18,
     "axes.titlesize": 20,
-    "legend.fontsize": 14,
+    "legend.fontsize": 13,
     "xtick.labelsize": 15,
     "ytick.labelsize": 15,
     "figure.figsize": (10, 6),
@@ -38,26 +38,21 @@ CGRAY = "#7F7F7F"
 
 # ============================================================
 # User-configurable known source energies (keV)
-# Keep only peaks you realistically expect to use.
 # ============================================================
 
 KNOWN_PEAKS_KEV = {
-    "Na22": np.array([511.0, 1274.537]),
-    "Ba133": np.array([81.0, 276.4, 302.85, 356.01, 383.85]),
+    "Na22": np.array([511.0]),
+    "Ba133": np.array([81.0, 302.85, 356.01]),
     "Cs137": np.array([661.657]),
 }
 
 # ============================================================
 # Optional low-bin cutoffs to suppress low-energy noise
 # Values are in REBINNED bins (1024-bin spectra).
-# Add/edit entries as needed.
 # ============================================================
 
 LOW_BIN_CUTOFFS = {
     ("03-10", "Na22", "scatter"): 80,
-    # Add more if needed, e.g.
-    # ("03-10", "Ba133", "scatter"): 40,
-    # ("03-11", "Cs137", "recoil"): 20,
 }
 
 def get_low_bin_cutoff(
@@ -297,10 +292,11 @@ def find_and_fit_peaks(
     height: Optional[float] = None,
     distance: int = 20,
     fit_half_width: int = 12,
-    max_peaks: int = 10,
+    max_peaks: int = 5,
     source_hint: Optional[str] = None,
     min_bin: int = 0,
     calibration: Optional[CalibrationResult] = None,
+    min_p_value: float = 0.05,
 ):
     """
     Find candidate peaks, fit each with Gaussian + linear background,
@@ -308,6 +304,8 @@ def find_and_fit_peaks(
 
     If calibration is provided, plots use energy [keV] on the x-axis.
     Fits are still performed in bin space.
+
+    Peaks with chi2 probability below min_p_value are rejected.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -345,8 +343,8 @@ def find_and_fit_peaks(
 
     # Candidate overview plot
     fig, ax = plt.subplots()
-    ax.bar(xplot_use, counts_use, width=np.diff(xplot_use).mean() if len(xplot_use) > 1 else 1.0,
-           color=CBLUE, edgecolor=None, linewidth=0)
+    bar_width = np.diff(xplot_use).mean() if len(xplot_use) > 1 else 1.0
+    ax.bar(xplot_use, counts_use, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0)
 
     if len(peak_indices_local) > 0:
         ax.plot(
@@ -405,6 +403,7 @@ def find_and_fit_peaks(
         upper = [np.inf, xfit.max(), fit_half_width, np.inf, np.inf]
 
         success = True
+        rejected_for_p = False
         try:
             popt, pcov = curve_fit(
                 gaussian_plus_linear,
@@ -418,6 +417,11 @@ def find_and_fit_peaks(
             model = gaussian_plus_linear(xfit, *popt)
             chi2_val, ndof, p_value = compute_chi2(yfit, model, yerr, 5)
             perr = np.sqrt(np.diag(pcov))
+
+            if np.isfinite(p_value) and p_value < min_p_value:
+                success = False
+                rejected_for_p = True
+
         except Exception:
             success = False
             popt = [np.nan] * 5
@@ -450,7 +454,7 @@ def find_and_fit_peaks(
         bar_width = np.diff(xfit_plot).mean() if len(xfit_plot) > 1 else 1.0
         ax.bar(xfit_plot, yfit, width=bar_width, color=CBLUE, edgecolor=None, linewidth=0, label="Data")
 
-        if success:
+        if np.all(np.isfinite(popt)):
             xdense = np.linspace(xfit.min(), xfit.max(), 400)
             ydense = gaussian_plus_linear(xdense, *popt)
 
@@ -469,11 +473,16 @@ def find_and_fit_peaks(
             ax.axvline(peak_plot, color=CGREEN, ls="--", lw=2,
                        label=f"Peak = {peak_plot:.2f} ± {peak_plot_err:.2f} {unit}")
 
+            status = "accepted" if success else "rejected"
+            if rejected_for_p:
+                status += f" ($p<{min_p_value}$)"
+
             textbox = (
                 f"$\\mu$ = {peak_plot:.2f} ± {peak_plot_err:.2f} {unit}\n"
                 f"$\\sigma$ = {popt[2]:.2f} ± {perr[2]:.2f} bins\n"
                 f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
-                f"$p$ = {p_value:.3f}"
+                f"$p$ = {p_value:.3f}\n"
+                f"{status}"
             )
             ax.text(
                 0.98, 0.95, textbox, transform=ax.transAxes,
@@ -549,10 +558,6 @@ def manual_match_calibration_peaks(
     fit_results: List[PeakFitResult],
     known_energies: np.ndarray
 ):
-    """
-    Interactively match fitted peaks to known source energies.
-    Allows one or more matched peaks from a source.
-    """
     valid = [r for r in fit_results if r.success]
     valid = sorted(valid, key=lambda r: r.fit_center)
 
@@ -579,9 +584,6 @@ def manual_match_calibration_peaks(
     print("\nEnter matches as:")
     print("    peak_index energy_index")
     print("one per line. Press Enter on a blank line when done.")
-    print("Example:")
-    print("    0 1")
-    print("    2 3")
 
     selected_peak_bins = []
     selected_peak_bin_errs = []
@@ -729,11 +731,6 @@ def calibrate_day_type(
     match_file: str = "manual_matches.json",
     force_rematch: bool = False
 ) -> CalibrationResult:
-    """
-    Build one combined calibration using Na22 + Ba133 for one day and one type.
-    Each source may contribute one or more matched peaks.
-    Need at least two total matched points across both sources.
-    """
     bins_list = []
     bin_errs_list = []
     energies_list = []
@@ -860,10 +857,6 @@ def calibrate_day_type(
     )
 
 def bin_to_energy(bin_value: float, bin_err: float, cal: CalibrationResult):
-    """
-    E = m b + c
-    var(E) = b^2 var(m) + var(c) + m^2 var(b) + 2 b cov(m,c)
-    """
     E = cal.slope * bin_value + cal.intercept
     varE = (
         (bin_value**2) * cal.cov[0, 0]
@@ -885,11 +878,8 @@ def choose_cs137_peak(
     min_bin: int = 0
 ) -> Tuple[PeakFitResult, Optional[PeakFitResult]]:
     """
-    Choose the Cs137 peak that is closest to the histogram maximum.
-    This is more robust than always taking the lowest-bin recoil peak.
-
-    For recoil, also return the highest-energy extra peak as a sanity check
-    if it is different from the chosen peak.
+    Choose the fitted peak closest to the histogram maximum.
+    For recoil, also return the highest-energy extra peak as sanity check.
     """
     valid = [r for r in fit_results if r.success]
     if len(valid) == 0:
@@ -903,8 +893,6 @@ def choose_cs137_peak(
         raise ValueError("No bins remain after applying min_bin in choose_cs137_peak")
 
     max_bin = bins_use[np.argmax(counts_use)]
-
-    # Choose the fitted peak closest to the histogram maximum
     desired_peak = min(valid, key=lambda r: abs(r.fit_center - max_bin))
 
     sanity_peak = None
@@ -914,6 +902,79 @@ def choose_cs137_peak(
             sanity_peak = highest_peak
 
     return desired_peak, sanity_peak
+
+# ============================================================
+# Calibration overview figure for each day
+# ============================================================
+
+def make_daily_calibration_overview(
+    date: str,
+    spectra_map: Dict[Tuple[str, str], Spectrum],
+    peak_map: Dict[Tuple[str, str], List[PeakFitResult]],
+    output_dir: str = "plots"
+):
+    """
+    Create a 2x2 figure for a given day showing:
+      scatter/Na22, scatter/Ba133, recoil/Na22, recoil/Ba133
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    layout = [
+        ("scatter", "Na22"),
+        ("scatter", "Ba133"),
+        ("recoil", "Na22"),
+        ("recoil", "Ba133"),
+    ]
+
+    for ax, (spec_type, source) in zip(axes.flat, layout):
+        key = (spec_type, source)
+        if key not in spectra_map:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(f"{date} {source} {spec_type}")
+            continue
+
+        sp = spectra_map[key]
+        min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle)
+        mask = sp.bins >= min_bin
+        bins_use = sp.bins[mask]
+        counts_use = sp.counts[mask]
+
+        ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+
+        results = peak_map.get(key, [])
+        valid = sorted([r for r in results if r.success], key=lambda r: r.fit_center)
+
+        for i, r in enumerate(valid):
+            yval = np.interp(r.fit_center, bins_use, counts_use)
+            ax.axvline(r.fit_center, color=CRED, lw=2)
+            ax.plot(r.fit_center, yval, 'o', color=CRED, markersize=7)
+            ax.text(
+                r.fit_center,
+                yval + 0.03 * np.max(counts_use) if np.max(counts_use) > 0 else yval + 1,
+                f"{i}",
+                color=CBLACK,
+                ha="center",
+                va="bottom",
+                fontsize=11,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none")
+            )
+
+        if min_bin > 0:
+            ax.text(
+                0.02, 0.95,
+                f"bin ≥ {min_bin}",
+                transform=ax.transAxes,
+                ha="left", va="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+            )
+
+        ax.set_title(f"{source} {spec_type}")
+        ax.set_xlabel("Bin")
+        ax.set_ylabel("Counts")
+
+    fig.suptitle(f"{date} calibration spectra overview", fontsize=22)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(os.path.join(output_dir, f"calibration_overview_{date}.png"), dpi=200)
+    plt.close(fig)
 
 # ============================================================
 # Main analysis workflow
@@ -939,6 +1000,9 @@ def analyze_compton_data(
 
     all_dates = sorted(set(sp.date for sp in spectra))
     for date in all_dates:
+        day_spectra_map = {}
+        day_peak_map = {}
+
         for spec_type in ["scatter", "recoil"]:
             source_peak_results = {}
 
@@ -948,6 +1012,7 @@ def analyze_compton_data(
                     continue
 
                 sp = by_date_type_source[key][0]
+                day_spectra_map[(spec_type, source)] = sp
 
                 min_bin = get_low_bin_cutoff(
                     date=sp.date,
@@ -962,9 +1027,12 @@ def analyze_compton_data(
                     title_prefix=f"{date}_{source}_{spec_type}",
                     output_dir=output_dir,
                     source_hint=source,
-                    min_bin=min_bin
+                    min_bin=min_bin,
+                    calibration=None,
+                    min_p_value=0.05
                 )
                 source_peak_results[source] = peak_results
+                day_peak_map[(spec_type, source)] = peak_results
 
             if len(source_peak_results) >= 1:
                 try:
@@ -983,6 +1051,13 @@ def analyze_compton_data(
                     print(f"     E = ({cal.slope:.5f} ± {cal.slope_err:.5f}) * bin + ({cal.intercept:.3f} ± {cal.intercept_err:.3f}) keV")
                 except Exception as e:
                     print(f"[WARN] Could not calibrate {date} {spec_type}: {e}")
+
+        make_daily_calibration_overview(
+            date=date,
+            spectra_map=day_spectra_map,
+            peak_map=day_peak_map,
+            output_dir=output_dir
+        )
 
     cs_energies: List[CsPeakEnergy] = []
     cs_sanity: List[CsPeakEnergy] = []
@@ -1012,7 +1087,8 @@ def analyze_compton_data(
             output_dir=output_dir,
             source_hint="Cs137",
             min_bin=min_bin,
-            calibration=cal
+            calibration=cal,
+            min_p_value=0.05
         )
 
         try:
@@ -1023,6 +1099,7 @@ def analyze_compton_data(
                 spec_type=sp.spec_type,
                 min_bin=min_bin
             )
+
             E, Eerr = bin_to_energy(desired_peak.fit_center, desired_peak.fit_center_err, cal)
 
             cs_energies.append(CsPeakEnergy(
@@ -1075,12 +1152,28 @@ def analyze_compton_data(
 
         ax.errorbar(
             angles, Etots, yerr=Eerrs,
-            fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8
+            fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+            label="Measured sums"
         )
+
+        expected_energy = 661.657
+        mean_all = np.mean(Etots)
+
+        mask_no_310 = ~np.isclose(angles, 310.0)
+        if np.any(mask_no_310):
+            mean_no_310 = np.mean(Etots[mask_no_310])
+        else:
+            mean_no_310 = np.nan
+
+        ax.axhline(expected_energy, color=CRED, lw=2.5, ls='--', label=f"Expected: {expected_energy:.1f} keV")
+        ax.axhline(mean_all, color=CGREEN, lw=2.5, ls='-.', label=f"Mean (all): {mean_all:.1f} keV")
+        if np.isfinite(mean_no_310):
+            ax.axhline(mean_no_310, color=CPURPLE, lw=2.5, ls=':', label=f"Mean (excluding 310°): {mean_no_310:.1f} keV")
 
         ax.set_xlabel("Scattering angle [deg]")
         ax.set_ylabel(r"$E_{\mathrm{scatter}} + E_{\mathrm{recoil}}$ [keV]")
         ax.set_title("Sum of scatter and recoil energies vs angle")
+        ax.legend(loc="best")
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "energy_sum_vs_angle.png"), dpi=200)
         plt.close(fig)
@@ -1133,7 +1226,7 @@ def analyze_compton_data(
 # ============================================================
 
 if __name__ == "__main__":
-    DATA_DIR = "data"                 # folder containing .Spe files
+    DATA_DIR = "data"
     OUTPUT_DIR = "plots"
     MATCH_FILE = "manual_matches.json"
 
