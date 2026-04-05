@@ -1726,7 +1726,7 @@ if __name__ == "__main__":
         for spec_type in ["scatter", "recoil"]:
             source_peak_results = {}
 
-            for source in ["Na22", "Ba133"]:
+            for source in ["Na22", "Ba133", "Cs137"]:
                 key = (date, spec_type, source)
                 if key not in by_date_type_source:
                     continue
@@ -1737,7 +1737,7 @@ if __name__ == "__main__":
         spectra_maps[date] = day_spectra_map
 
         for sp_type in ("recoil", "scatter"):
-            for source in ("Na22", "Ba133"):
+            for source in ("Na22", "Ba133", "Cs137"):
                 output_dir = OUTPUT_DIR + DIR_SOURCE[source] + DIR_TYPE[sp_type] + DIR_ANALYSIS["raw"]
                 key = (sp_type, source)
                 sp = day_spectra_map[key]
