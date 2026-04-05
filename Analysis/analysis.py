@@ -71,7 +71,7 @@ LOW_BIN_CUTOFFS = {
 SYSTEMATIC_CONFIG = {
     "enabled": True,
     "fit_half_width_values": [10, 12, 14],
-    "p_value_cut_values": [0.05],
+    "p_value_cut_values": [0.05, 0],
     "low_bin_cut_shifts": [-10, 0, 10],
     "cs_peak_rules": ["closest_to_max", "highest_count"],
 }
@@ -1801,8 +1801,8 @@ if __name__ == "__main__":
             print("=" * 80)
 
             print("\nBy angle:")
-            for angle in sorted(sys_summary["by_angle"].keys()):
-                sys_err = sys_summary["by_angle"][angle]["systematic_err_keV"]
+            for angle in sorted(sys_summary["sum_by_angle"].keys()):
+                sys_err = sys_summary["sum_by_angle"][angle]["systematic_err_keV"]
                 print(f"  angle = {angle:6.1f} deg: systematic = {sys_err:.2f} keV")
 
             if results["mean_results"] is not None:
