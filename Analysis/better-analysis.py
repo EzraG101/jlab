@@ -845,6 +845,16 @@ def bin_to_energy(bin_value: float, bin_err: float, cal: CalibrationResult):
     )
     return E, math.sqrt(max(varE, 0.0))
 
+def b_to_e(bin_value: float, bin_err: float, m: float, b: float, m_err: float, b_err: float, cross_cov: float):
+    E = m * bin_value + b
+    varE = (
+        (bin_value**2) * m_err * m_err
+        + b_err * b_err
+        + (m**2) * (bin_err**2)
+        + 2 * bin_value * cross_cov
+    )
+    return E, math.sqrt(max(varE, 0.0))
+
 # ============================================================
 # Cs137 peak selection and plots
 # ============================================================
@@ -1958,6 +1968,7 @@ if __name__ == "__main__":
     #############
     calibrations = {}
     calibration_errors = {}
+    calibration_cross_covs = {}
     for date in all_dates:
         for sp_type in ["scatter", "recoil"]:
             output_dir = OUTPUT_DIR + "\\calibrations"
@@ -1986,6 +1997,7 @@ if __name__ == "__main__":
 
             calibrations[f"{date}-{sp_type}"] = m, b
             calibration_errors[f"{date}-{sp_type}"] = m_err, b_err
+            calibration_cross_covs[f"{date}-{sp_type}"] = pcov[0,1]
 
             xdense = np.linspace(yfit.min(), yfit.max(), 400)
             ydense = weighted_linear(xdense, m, b)
@@ -2025,8 +2037,7 @@ if __name__ == "__main__":
                 min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, LOW_BIN_CUTOFFS)
                 mask = sp.bins >= min_bin
 
-                m = calibrations[f"{date}-{sp_type}"][0]
-                b = calibrations[f"{date}-{sp_type}"][1]
+                m, b = calibrations[f"{date}-{sp_type}"]
                 energies_use = m * sp.bins[mask] + b
                 counts_use = sp.counts[mask]
 
@@ -2041,4 +2052,89 @@ if __name__ == "__main__":
     #####################
     # Cs137 Single Peak #
     #####################
+    Cs137_peak_locations = {}
+    Cs137_peak_errors = {}
+    for date in all_dates:
+        for sp_type in ("recoil", "scatter"):
+            output_dir = OUTPUT_DIR + DIR_SOURCE["Cs137"] + DIR_TYPE[sp_type] + DIR_ANALYSIS["local"]
+            sp_list = spectra_maps[date][(sp_type, "Cs137")]
 
+            for sp_Cs137 in sp_list:
+                min_bin = get_low_bin_cutoff(sp_Cs137.date, sp_Cs137.source, sp_Cs137.spec_type, sp_Cs137.angle, LOW_BIN_CUTOFFS)
+                mask = sp_Cs137.bins >= min_bin
+                
+                counts = sp_Cs137.counts
+                bins = sp_Cs137.bins
+
+                max_bin_index = int(np.argmax(counts[mask])) + min_bin
+
+                bins_use = bins[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+                counts_use = counts[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+
+                left = max(0, max_bin_index - HALF_WIDTH_FIT)
+                right = min(len(bins_use) - 1, max_bin_index + HALF_WIDTH_FIT)
+
+                xfit = bins_use
+                yfit = counts_use
+                yerr = poisson_errors(yfit)
+
+                A0 = max(yfit) - np.median(yfit)
+                mu0 = max_bin_index
+                sigma0 = max(1.5, HALF_WIDTH_FIT / 4)
+                b00 = np.median(yfit)
+                b10 = 0.0
+
+                lower = [0, xfit.min(), 0.5, -np.inf, -np.inf]
+                upper = [np.inf, xfit.max(), HALF_WIDTH_FIT, np.inf, np.inf]
+
+                popt, pcov = curve_fit(
+                    gaussian_plus_linear,
+                    xfit, yfit,
+                    p0=[A0, mu0, sigma0, b00, b10],
+                    sigma=yerr,
+                    absolute_sigma=True,
+                    bounds=(lower, upper),
+                    maxfev=20000
+                )
+                model = gaussian_plus_linear(xfit, *popt)
+                chi2_val, ndof, p_value = compute_chi2(yfit, model, yerr, 5)
+                perr = np.sqrt(np.diag(pcov))
+
+                xdense = np.linspace(xfit.min(), xfit.max(), 400)
+                ydense = gaussian_plus_linear(xdense, *popt)
+                peak_plot = popt[1]
+                peak_plot_err = perr[1]
+
+                m, b = calibrations[f"{date}-{sp_type}"]
+                m_err, b_err = calibration_errors[f"{date}-{sp_type}"]
+                cross_cov = calibration_cross_covs[f"{date}-{sp_type}"]
+
+                peak_energy, peak_energy_err = b_to_e(peak_plot, peak_plot_err, m, b, m_err, b_err, cross_cov)
+                sigma, sigma_err = b_to_e(popt[2], perr[2], m, b, m_err, b_err, cross_cov)
+
+                Cs137_peak_locations[f"{date}-{sp_type}"] = peak_energy
+                Cs137_peak_errors[f"{date}-{sp_type}"] = peak_energy_err
+
+                fig, ax = plt.subplots()
+                ax.bar(m*bins_use+b, counts_use, width=m*1.0, color=CBLUE, edgecolor=None, linewidth=0)
+                ax.set_title(f"{date}: Cs137 {sp_Cs137.angle} ({sp_type})")
+                ax.set_xlabel("Energy [keV]")
+                ax.set_ylabel("Counts")
+                ax.plot(m*xdense+b, ydense, color=CRED, lw=2.5, label="Gaussian + linear fit")
+                ax.axvline(peak_energy, color=CGREEN, ls="--", lw=2,
+                            label=f"Peak = {peak_energy:.2f} ± {peak_energy_err:.2f}")
+
+                textbox = (
+                    f"$\\mu$ = {peak_energy:.2f} ± {peak_energy_err:.2f} keV\n"
+                    f"$\\sigma$ = {sigma:.2f} ± {sigma_err:.2f} keV\n"
+                    f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+                    f"$p$ = {p_value:.3f}\n"
+                )
+                ax.text(
+                    0.98, 0.95, textbox, transform=ax.transAxes,
+                    ha="right", va="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+                )
+                plt.tight_layout(rect=[0, 0, 1, 0.97])
+                plt.savefig(os.path.join(output_dir, f"{date}-{sp_Cs137.angle}-local_peak-{2048//FACTOR}.png"), dpi=200)
+                plt.close(fig)
