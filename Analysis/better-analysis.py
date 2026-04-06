@@ -43,8 +43,9 @@ CGRAY = "#7F7F7F"
 # ============================================================
 
 FACTOR = 16
-UNIVERSAL_CUTOFF = 160 // FACTOR
+UNIVERSAL_CUTOFF = 120 // FACTOR
 HALF_WIDTH_FIT = 88 // FACTOR
+PROMINENCE = 20 * FACTOR
 
 SYSTEMATIC_CONFIG = {
     "enabled": False,
@@ -1704,6 +1705,7 @@ if __name__ == "__main__":
     ###################
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR+"\\calibrations", exist_ok=True)
     for sp_type in DIR_TYPE:
         for source in DIR_SOURCE:
             for a in DIR_ANALYSIS:
@@ -1820,8 +1822,8 @@ if __name__ == "__main__":
             peak_plot = popt[1]
             peak_plot_err = perr[1]
 
-            Na22_peak_locations[f"{date}-{sp_type}"] = peak_plot
-            Na22_peak_errors[f"{date}-{sp_type}"] = peak_plot_err
+            Na22_peak_locations[f"{date}-{sp_type}", 511] = peak_plot
+            Na22_peak_errors[f"{date}-{sp_type}", 511] = peak_plot_err
 
             fig, ax = plt.subplots()
             ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
@@ -1850,3 +1852,155 @@ if __name__ == "__main__":
     ###############
     # Ba133 Peaks #
     ###############
+    Ba133_peak_locations = {}
+    Ba133_peak_errors = {}
+    for date in all_dates:
+        for sp_type in ("recoil", "scatter"):
+            output_dir = OUTPUT_DIR + DIR_SOURCE["Ba133"] + DIR_TYPE[sp_type] + DIR_ANALYSIS["local"]
+            sp_Ba133 = spectra_maps[date][(sp_type, "Ba133")][0]
+
+            min_bin = get_low_bin_cutoff(sp_Ba133.date, sp_Ba133.source, sp_Ba133.spec_type, sp_Ba133.angle, LOW_BIN_CUTOFFS)
+            mask = sp_Ba133.bins >= min_bin
+
+            counts = sp_Ba133.counts
+            counts_use = counts[mask]
+            bins = sp_Ba133.bins
+            bins_use = bins[mask]
+            
+            # Candidates from find_peaks
+            peaks, _ = find_peaks(counts_use, distance=2*HALF_WIDTH_FIT, prominence=PROMINENCE)
+
+            fig, ax = plt.subplots()
+            ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+            ax.vlines(bins_use[peaks], 0, counts_use[peaks], colors=CORANGE)
+            ax.set_title(f"{date}: Ba133 ({sp_type})")
+            ax.set_xlabel("Bin")
+            ax.set_ylabel("Counts")
+            plt.tight_layout(rect=[0, 0, 1, 0.97])
+            plt.savefig(os.path.join(output_dir, f"{date}-candidates-{2048//FACTOR}.png"), dpi=200)
+            plt.close(fig)
+
+            # Refinement
+            indices = [(0, 81), (1, 160), (-1, 356)] if sp_type == "scatter" else [(0, 81), (1, 160), (-2, 356)]
+
+            for index in indices:
+                max_bin_index = peaks[index[0]] + min_bin
+
+                bins_use = bins[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+                counts_use = counts[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+
+                left = max(0, max_bin_index - HALF_WIDTH_FIT)
+                right = min(len(bins_use) - 1, max_bin_index + HALF_WIDTH_FIT)
+
+                xfit = bins_use
+                yfit = counts_use
+                yerr = poisson_errors(yfit)
+
+                A0 = max(yfit) - np.median(yfit)
+                mu0 = max_bin_index
+                sigma0 = max(1.5, HALF_WIDTH_FIT / 4)
+                b00 = np.median(yfit)
+                b10 = 0.0
+
+                lower = [0, xfit.min(), 0.5, -np.inf, -np.inf]
+                upper = [np.inf, xfit.max(), HALF_WIDTH_FIT, np.inf, np.inf]
+
+                popt, pcov = curve_fit(
+                    gaussian_plus_linear,
+                    xfit, yfit,
+                    p0=[A0, mu0, sigma0, b00, b10],
+                    sigma=yerr,
+                    absolute_sigma=True,
+                    bounds=(lower, upper),
+                    maxfev=20000
+                )
+                model = gaussian_plus_linear(xfit, *popt)
+                chi2_val, ndof, p_value = compute_chi2(yfit, model, yerr, 5)
+                perr = np.sqrt(np.diag(pcov))
+
+                xdense = np.linspace(xfit.min(), xfit.max(), 400)
+                ydense = gaussian_plus_linear(xdense, *popt)
+                peak_plot = popt[1]
+                peak_plot_err = perr[1]
+
+                Ba133_peak_locations[f"{date}-{sp_type}", index[1]] = peak_plot
+                Ba133_peak_errors[f"{date}-{sp_type}", index[1]] = peak_plot_err
+
+                fig, ax = plt.subplots()
+                ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+                ax.set_title(f"{date}: Ba133 ({sp_type})")
+                ax.set_xlabel("Bin")
+                ax.set_ylabel("Counts")
+                ax.plot(xdense, ydense, color=CRED, lw=2.5, label="Gaussian + linear fit")
+                ax.axvline(peak_plot, color=CGREEN, ls="--", lw=2,
+                            label=f"Peak = {peak_plot:.2f} ± {peak_plot_err:.2f}")
+
+                textbox = (
+                    f"$\\mu$ = {peak_plot:.2f} ± {peak_plot_err:.2f}\n"
+                    f"$\\sigma$ = {popt[2]:.2f} ± {perr[2]:.2f} bins\n"
+                    f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+                    f"$p$ = {p_value:.3f}\n"
+                )
+                ax.text(
+                    0.98, 0.95, textbox, transform=ax.transAxes,
+                    ha="right", va="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+                )
+                plt.tight_layout(rect=[0, 0, 1, 0.97])
+                plt.savefig(os.path.join(output_dir, f"{date}-local_peak{index[1]}-{2048//FACTOR}.png"), dpi=200)
+                plt.close(fig)
+    
+    #############
+    # CALIBRATE #
+    #############
+    calibrations = {}
+    for date in all_dates:
+        for sp_type in ["scatter", "recoil"]:
+            output_dir = OUTPUT_DIR + "\\calibrations"
+
+            xfit = np.array([511, 356, 160, 81])
+            yfit = np.array([Na22_peak_locations[f"{date}-{sp_type}", 511], Ba133_peak_locations[f"{date}-{sp_type}", 356], Ba133_peak_locations[f"{date}-{sp_type}", 160], Ba133_peak_locations[f"{date}-{sp_type}", 81]])
+            yerr = np.array([Na22_peak_errors[f"{date}-{sp_type}", 511], Ba133_peak_errors[f"{date}-{sp_type}", 356], Ba133_peak_errors[f"{date}-{sp_type}", 160], Ba133_peak_errors[f"{date}-{sp_type}", 81]])
+            
+            popt, pcov = curve_fit(
+                weighted_linear,
+                xfit, yfit,
+                sigma=yerr,
+                absolute_sigma=True,
+                bounds=(0, 2048//FACTOR),
+                maxfev=20000
+            )
+            # Swap x and y !!! BE CAREFUL
+            m = 1 / popt[0]
+            b = - popt[1] / popt[0]
+            model = weighted_linear(yfit, m, b)
+            chi2_val, ndof, p_value = compute_chi2(xfit, model, m*yerr, 2)
+
+            perr = np.sqrt(np.diag(pcov))
+            m_err = m * m * perr[0]
+            b_err = m * perr[1] - m * b * perr[0] 
+
+            xdense = np.linspace(yfit.min(), yfit.max(), 400)
+            ydense = weighted_linear(xdense, m, b)
+
+            fig, ax = plt.subplots()
+            ax.scatter(yfit, xfit, color=CPURPLE)
+            ax.set_title(f"{date}: Calibration")
+            ax.set_xlabel("Bin")
+            ax.set_ylabel("Energy [keV]")
+            ax.plot(xdense, ydense, color=CRED, lw=2.5, label="Linear Fit")
+
+            textbox = (
+                f"$m$ = {m:.2f} ± {m_err:.2f}\n"
+                f"$b$ = {b:.2f} ± {b_err:.2f} bins\n"
+                f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+                f"$p$ = {p_value:.3f}\n"
+            )
+            ax.text(
+                0.02, 0.95, textbox, transform=ax.transAxes,
+                ha="left", va="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+            )
+            plt.tight_layout(rect=[0, 0, 1, 0.97])
+            plt.savefig(os.path.join(output_dir, f"{date}-{sp_type}-{2048//FACTOR}.png"), dpi=200)
+            plt.close(fig)
