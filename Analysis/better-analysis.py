@@ -1755,7 +1755,10 @@ if __name__ == "__main__":
 
                     fig, ax = plt.subplots()
                     ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
-                    ax.set_title(f"{date}: {source} ({sp_type})")
+                    if source == "Cs137":
+                        ax.set_title(f"{date}: {source} {sp.angle} ({sp_type})")
+                    else:
+                        ax.set_title(f"{date}: {source} ({sp_type})")
                     ax.set_xlabel("Bin")
                     ax.set_ylabel("Counts")
                     plt.tight_layout(rect=[0, 0, 1, 0.97])
@@ -1954,6 +1957,7 @@ if __name__ == "__main__":
     # CALIBRATE #
     #############
     calibrations = {}
+    calibration_errors = {}
     for date in all_dates:
         for sp_type in ["scatter", "recoil"]:
             output_dir = OUTPUT_DIR + "\\calibrations"
@@ -1980,6 +1984,9 @@ if __name__ == "__main__":
             m_err = m * m * perr[0]
             b_err = m * perr[1] - m * b * perr[0] 
 
+            calibrations[f"{date}-{sp_type}"] = m, b
+            calibration_errors[f"{date}-{sp_type}"] = m_err, b_err
+
             xdense = np.linspace(yfit.min(), yfit.max(), 400)
             ydense = weighted_linear(xdense, m, b)
 
@@ -1991,7 +1998,7 @@ if __name__ == "__main__":
             ax.plot(xdense, ydense, color=CRED, lw=2.5, label="Linear Fit")
 
             textbox = (
-                f"$m$ = {m:.2f} ± {m_err:.2f}\n"
+                f"$m$ = {m:.2f} ± {m_err:.2f} keV/bin\n"
                 f"$b$ = {b:.2f} ± {b_err:.2f} bins\n"
                 f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
                 f"$p$ = {p_value:.3f}\n"
@@ -2004,3 +2011,34 @@ if __name__ == "__main__":
             plt.tight_layout(rect=[0, 0, 1, 0.97])
             plt.savefig(os.path.join(output_dir, f"{date}-{sp_type}-{2048//FACTOR}.png"), dpi=200)
             plt.close(fig)
+
+    ###############################
+    # Cs137 Raw After Calibration #
+    ###############################
+
+    for sp_type in ("recoil", "scatter"):
+        for date in all_dates:
+            output_dir = OUTPUT_DIR + DIR_SOURCE["Cs137"] + DIR_TYPE[sp_type] + DIR_ANALYSIS["raw"]
+            key = (sp_type, "Cs137")
+            sp_list = spectra_maps[date][key]
+            for sp in sp_list:
+                min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, LOW_BIN_CUTOFFS)
+                mask = sp.bins >= min_bin
+
+                m = calibrations[f"{date}-{sp_type}"][0]
+                b = calibrations[f"{date}-{sp_type}"][1]
+                energies_use = m * sp.bins[mask] + b
+                counts_use = sp.counts[mask]
+
+                fig, ax = plt.subplots()
+                ax.bar(energies_use, counts_use, width=m*1.0, color=CBLUE, edgecolor=None, linewidth=0)
+                ax.set_title(f"{date}: Cs137 {sp.angle} ({sp_type})")
+                ax.set_xlabel("Energy [keV]")
+                ax.set_ylabel("Counts")
+                plt.tight_layout(rect=[0, 0, 1, 0.97])
+                plt.savefig(os.path.join(output_dir, f"{date}-{sp.angle}-calibrated-rebinned{2048//FACTOR}.png"), dpi=200)
+
+    #####################
+    # Cs137 Single Peak #
+    #####################
+
