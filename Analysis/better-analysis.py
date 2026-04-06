@@ -430,7 +430,7 @@ def find_and_fit_peaks(
             ax.legend(loc="best")
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_peak_candidates.png"), dpi=200)
-        plt.close(fig)
+        plt.close()
 
     fit_results = []
 
@@ -554,7 +554,7 @@ def find_and_fit_peaks(
             ax.legend(loc="best")
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_candidate_{i+1}_fit.png"), dpi=200)
-            plt.close(fig)
+            plt.close()
 
     if save_plots:
         fig, ax = plt.subplots()
@@ -585,7 +585,7 @@ def find_and_fit_peaks(
         ax.set_title(f"{title_prefix} fitted peaks")
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_fitted_peaks.png"), dpi=200)
-        plt.close(fig)
+        plt.close()
 
     return fit_results
 
@@ -817,7 +817,7 @@ def calibrate_day_type(
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"calibration_{date}_{spec_type}.png"), dpi=200)
-    plt.close(fig)
+    plt.close()
 
     return CalibrationResult(
         date=date,
@@ -969,7 +969,7 @@ def make_selected_cs137_peak_plot(
         ),
         dpi=200
     )
-    plt.close(fig)
+    plt.close()
 
 # ============================================================
 # Daily calibration overview
@@ -1026,7 +1026,7 @@ def make_daily_calibration_overview(date, spectra_map, peak_map, output_dir="bet
     fig.suptitle(f"{date} calibration spectra overview", fontsize=22)
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     plt.savefig(os.path.join(output_dir, f"calibration_overview_{date}.png"), dpi=200)
-    plt.close(fig)
+    plt.close()
 
 # ============================================================
 # Energy sum and Compton plots
@@ -1087,7 +1087,7 @@ def make_energy_sum_plot(
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, filename), dpi=200)
-    plt.close(fig)
+    plt.close()
 
     sys_all = np.nan
     sys_no_310 = np.nan
@@ -1174,7 +1174,7 @@ def make_inverse_scatter_energy_plot(
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, filename), dpi=200)
-    plt.close(fig)
+    plt.close()
 
 def make_inverse_recoil_energy_plot(
     cs_energies,
@@ -1243,7 +1243,7 @@ def make_inverse_recoil_energy_plot(
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, filename), dpi=200)
-    plt.close(fig)
+    plt.close()
 
 # ============================================================
 # Main analysis
@@ -1716,6 +1716,7 @@ if __name__ == "__main__":
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR+"\\calibrations", exist_ok=True)
+    os.makedirs(OUTPUT_DIR+"\\final", exist_ok=True)
     for sp_type in DIR_TYPE:
         for source in DIR_SOURCE:
             for a in DIR_ANALYSIS:
@@ -1776,7 +1777,7 @@ if __name__ == "__main__":
                         plt.savefig(os.path.join(output_dir, f"{date}-{sp.angle}-rebinned{2048//FACTOR}.png"), dpi=200)
                     else:
                         plt.savefig(os.path.join(output_dir, f"{date}-rebinned{2048//FACTOR}.png"), dpi=200)
-                    plt.close(fig)
+                    plt.close()
     
     ####################
     # SINGLE NA22 PEAK #
@@ -1860,7 +1861,7 @@ if __name__ == "__main__":
             )
             plt.tight_layout(rect=[0, 0, 1, 0.97])
             plt.savefig(os.path.join(output_dir, f"{date}-local_peak-{2048//FACTOR}.png"), dpi=200)
-            plt.close(fig)
+            plt.close()
 
     ###############
     # Ba133 Peaks #
@@ -1891,7 +1892,7 @@ if __name__ == "__main__":
             ax.set_ylabel("Counts")
             plt.tight_layout(rect=[0, 0, 1, 0.97])
             plt.savefig(os.path.join(output_dir, f"{date}-candidates-{2048//FACTOR}.png"), dpi=200)
-            plt.close(fig)
+            plt.close()
 
             # Refinement
             indices = [(0, 81), (1, 160), (-1, 356)] if sp_type == "scatter" else [(0, 81), (1, 160), (-2, 356)]
@@ -1961,7 +1962,7 @@ if __name__ == "__main__":
                 )
                 plt.tight_layout(rect=[0, 0, 1, 0.97])
                 plt.savefig(os.path.join(output_dir, f"{date}-local_peak{index[1]}-{2048//FACTOR}.png"), dpi=200)
-                plt.close(fig)
+                plt.close()
     
     #############
     # CALIBRATE #
@@ -2022,7 +2023,7 @@ if __name__ == "__main__":
             )
             plt.tight_layout(rect=[0, 0, 1, 0.97])
             plt.savefig(os.path.join(output_dir, f"{date}-{sp_type}-{2048//FACTOR}.png"), dpi=200)
-            plt.close(fig)
+            plt.close()
 
     ###############################
     # Cs137 Raw After Calibration #
@@ -2112,8 +2113,8 @@ if __name__ == "__main__":
                 peak_energy, peak_energy_err = b_to_e(peak_plot, peak_plot_err, m, b, m_err, b_err, cross_cov)
                 sigma, sigma_err = b_to_e(popt[2], perr[2], m, b, m_err, b_err, cross_cov)
 
-                Cs137_peak_locations[f"{date}-{sp_type}"] = peak_energy
-                Cs137_peak_errors[f"{date}-{sp_type}"] = peak_energy_err
+                Cs137_peak_locations[sp_Cs137.angle, sp_type] = peak_energy
+                Cs137_peak_errors[sp_Cs137.angle, sp_type] = peak_energy_err
 
                 fig, ax = plt.subplots()
                 ax.bar(m*bins_use+b, counts_use, width=m*1.0, color=CBLUE, edgecolor=None, linewidth=0)
@@ -2137,4 +2138,57 @@ if __name__ == "__main__":
                 )
                 plt.tight_layout(rect=[0, 0, 1, 0.97])
                 plt.savefig(os.path.join(output_dir, f"{date}-{sp_Cs137.angle}-local_peak-{2048//FACTOR}.png"), dpi=200)
-                plt.close(fig)
+                plt.close()
+    
+    ####################
+    # Experiment Goals #
+    ####################
+
+    # Energy Sum
+
+    peaks_by_angle = {}
+    output_dir = OUTPUT_DIR + "\\final"
+    for (theta, sp_type) in Cs137_peak_locations:
+        print(theta)
+        if theta in peaks_by_angle:
+            peaks_by_angle[theta].append((sp_type, Cs137_peak_locations[theta, sp_type], Cs137_peak_errors[theta, sp_type]))
+        else:
+            peaks_by_angle[theta] = [(sp_type, Cs137_peak_locations[theta, sp_type], Cs137_peak_errors[theta, sp_type])]
+
+    angles = []
+    Etots = []
+    Eerrs = []
+    for theta in peaks_by_angle:
+        angles.append(theta)
+        Etots.append(peaks_by_angle[theta][0][1]+peaks_by_angle[theta][1][1])
+        Eerrs.append(np.sqrt(peaks_by_angle[theta][0][2]**2 + peaks_by_angle[theta][1][2]**2))
+    
+    angles = np.array(angles)
+    Etots = np.array(Etots)
+    Eerrs = np.array(Eerrs)
+
+    mask = ~np.isclose(angles, 310)
+    mean_energy, mean_energy_err = mean_with_propagated_uncertainty(Etots, Eerrs)
+    mean_energy_no_310, mean_energy_err_no_310 = mean_with_propagated_uncertainty(Etots[mask], Eerrs[mask])
+
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        angles, Etots, yerr=Eerrs,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured sums"
+    )
+    ax.axhline(mean_energy, color=CRED, lw=2.5, ls='--',
+               label=f"Mean: {mean_energy:.1f} ± {mean_energy_err:.1f} keV")
+    ax.axhline(mean_energy_no_310, color=CGREEN, lw=2.5, ls='--',
+               label=f"Mean w/o 310: {mean_energy_no_310:.1f} ± {mean_energy_err_no_310:.1f} keV")
+    ax.axhline(661.567, color=CPURPLE, lw=2.5, ls='--',
+               label=f"Expected: {661.657:.1f} keV")
+    ax.set_xlabel("Scattering angle [deg]")
+    ax.set_ylabel(r"$E_{\gamma} + E_{e}$ [keV]")
+    ax.set_title("Sum of scatter and recoil energies vs angle")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"energy_sum_vs_angle-{2048//FACTOR}.png"), dpi=200)
+    plt.close()
+
+    # Scatter / Recoil Plots 
