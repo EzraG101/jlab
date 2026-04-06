@@ -42,7 +42,7 @@ CGRAY = "#7F7F7F"
 # Systematic-study configuration
 # ============================================================
 
-FACTOR = 8
+FACTOR = 16
 UNIVERSAL_CUTOFF = 160 // FACTOR
 HALF_WIDTH_FIT = 88 // FACTOR
 
@@ -315,6 +315,9 @@ def load_all_spectra(data_dir: str, factor=16) -> List[Spectrum]:
 # ============================================================
 # Models and fitting
 # ============================================================
+
+def quadratic(x, a, b, c):
+    return a * x * x + b * x + c
 
 def gaussian_plus_linear(x, A, mu, sigma, b0, b1):
     return A * np.exp(-0.5 * ((x - mu) / sigma) ** 2) + b0 + b1 * x
@@ -1730,8 +1733,9 @@ if __name__ == "__main__":
                 key = (date, spec_type, source)
                 if key not in by_date_type_source:
                     continue
-
-                sp = by_date_type_source[key][0]
+                
+  
+                sp = by_date_type_source[key]
                 day_spectra_map[(spec_type, source)] = sp
 
         spectra_maps[date] = day_spectra_map
@@ -1740,20 +1744,24 @@ if __name__ == "__main__":
             for source in ("Na22", "Ba133", "Cs137"):
                 output_dir = OUTPUT_DIR + DIR_SOURCE[source] + DIR_TYPE[sp_type] + DIR_ANALYSIS["raw"]
                 key = (sp_type, source)
-                sp = day_spectra_map[key]
-                min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, LOW_BIN_CUTOFFS)
-                mask = sp.bins >= min_bin
-                bins_use = sp.bins[mask]
-                counts_use = sp.counts[mask]
+                sp_list = day_spectra_map[key]
+                for sp in sp_list:
+                    min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, LOW_BIN_CUTOFFS)
+                    mask = sp.bins >= min_bin
+                    bins_use = sp.bins[mask]
+                    counts_use = sp.counts[mask]
 
-                fig, ax = plt.subplots()
-                ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
-                ax.set_title(f"{date}: {source} ({sp_type})")
-                ax.set_xlabel("Bin")
-                ax.set_ylabel("Counts")
-                plt.tight_layout(rect=[0, 0, 1, 0.97])
-                plt.savefig(os.path.join(output_dir, f"{date}-rebinned{2048//FACTOR}.png"), dpi=200)
-                plt.close(fig)
+                    fig, ax = plt.subplots()
+                    ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+                    ax.set_title(f"{date}: {source} ({sp_type})")
+                    ax.set_xlabel("Bin")
+                    ax.set_ylabel("Counts")
+                    plt.tight_layout(rect=[0, 0, 1, 0.97])
+                    if source == "Cs137":
+                        plt.savefig(os.path.join(output_dir, f"{date}-{sp.angle}-rebinned{2048//FACTOR}.png"), dpi=200)
+                    else:
+                        plt.savefig(os.path.join(output_dir, f"{date}-rebinned{2048//FACTOR}.png"), dpi=200)
+                    plt.close(fig)
     
     ####################
     # SINGLE NA22 PEAK #
@@ -1763,10 +1771,10 @@ if __name__ == "__main__":
     for date in all_dates:
         for sp_type in ("recoil", "scatter"):
             output_dir = OUTPUT_DIR + DIR_SOURCE["Na22"] + DIR_TYPE[sp_type] + DIR_ANALYSIS["local"]
-            sp_Na22 = spectra_maps[date][(sp_type, "Na22")]
+            sp_Na22 = spectra_maps[date][(sp_type, "Na22")][0]
 
-            min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, LOW_BIN_CUTOFFS)
-            mask = sp.bins >= min_bin
+            min_bin = get_low_bin_cutoff(sp_Na22.date, sp_Na22.source, sp_Na22.spec_type, sp_Na22.angle, LOW_BIN_CUTOFFS)
+            mask = sp_Na22.bins >= min_bin
             
             counts = sp_Na22.counts
             bins = sp_Na22.bins
