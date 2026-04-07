@@ -2156,14 +2156,26 @@ if __name__ == "__main__":
             peaks_by_angle[theta] = [(sp_type, Cs137_peak_locations[theta, sp_type], Cs137_peak_errors[theta, sp_type])]
 
     angles = []
+    Erecoils = []
+    Erecoilerrs = []
+    Escatters = []
+    Escattererrs = []
     Etots = []
     Eerrs = []
     for theta in peaks_by_angle:
         angles.append(theta)
+        Erecoils.append(peaks_by_angle[theta][0][1] if peaks_by_angle[theta][0][0] == "recoil" else peaks_by_angle[theta][1][1])
+        Erecoilerrs.append(peaks_by_angle[theta][0][2] if peaks_by_angle[theta][0][0] == "recoil" else peaks_by_angle[theta][1][2])
+        Escatters.append(peaks_by_angle[theta][0][1] if peaks_by_angle[theta][0][0] == "scatter" else peaks_by_angle[theta][1][1])
+        Escattererrs.append(peaks_by_angle[theta][0][2] if peaks_by_angle[theta][0][0] == "scatter" else peaks_by_angle[theta][1][2])
         Etots.append(peaks_by_angle[theta][0][1]+peaks_by_angle[theta][1][1])
         Eerrs.append(np.sqrt(peaks_by_angle[theta][0][2]**2 + peaks_by_angle[theta][1][2]**2))
     
     angles = np.array(angles)
+    Erecoils = np.array(Erecoils)
+    Erecoilerrs = np.array(Erecoilerrs)
+    Escatters = np.array(Escatters)
+    Escattererrs = np.array(Escattererrs)
     Etots = np.array(Etots)
     Eerrs = np.array(Eerrs)
 
@@ -2191,4 +2203,113 @@ if __name__ == "__main__":
     plt.savefig(os.path.join(output_dir, f"energy_sum_vs_angle-{2048//FACTOR}.png"), dpi=200)
     plt.close()
 
-    # Scatter / Recoil Plots 
+    # Scatter Energy Plot
+
+    x = one_minus_cos_theta(angles)
+    y, yerr = inverse_with_error(Escatters, Escattererrs)
+
+    x_theory = np.linspace(0.0, max(1.05 * np.max(x), 2.05), 500)
+    y_theory = (1.0 / CS137_ENERGY_KEV) + (1.0 / ELECTRON_REST_ENERGY_KEV) * x_theory
+
+    popt, pcov = curve_fit(
+        weighted_linear,
+        x, y,
+        sigma=yerr,
+        absolute_sigma=True,
+        bounds=(0, 2048//FACTOR),
+        maxfev=20000
+    )
+    perr = np.sqrt(np.diag(pcov))
+
+    measured_Cs137_energy, measured_Cs137_energy_err = inverse_with_error(popt[1], perr[1])
+    measured_electron_energy, measured_electron_energy_err = inverse_with_error(popt[0], perr[0])
+
+    yfit = weighted_linear(x, *popt)
+    
+    chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr, 2)
+
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        x, y, yerr=yerr,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured data"
+    )
+    ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
+    ax.plot(x_theory, weighted_linear(x_theory, *popt), color=CGREEN, lw=2.5, label="Linear fit")
+
+    textbox = (
+        f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+        f"$p$ = {p_value:.3f}"
+    )
+    ax.text(
+        0.98, 0.95, textbox,
+        transform=ax.transAxes, ha="right", va="top",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+    )
+
+    ax.set_xlabel(r"$1-\cos\theta$")
+    ax.set_ylabel(r"$1/E_{\gamma}$ [keV$^{-1}$]")
+    ax.set_title(r"Inverse scattered-photon energy vs $1-\cos\theta$")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"scatter_energy_vs_angle-{2048//FACTOR}.png"), dpi=200)
+    plt.close()
+
+    # Recoil Energy Plot
+
+    x = 1 / one_minus_cos_theta(angles)
+    y, yerr = inverse_with_error(Erecoils, Erecoilerrs)
+
+    x_theory = np.linspace(0.0, max(1.05 * np.max(x), 2.05), 500)
+    y_theory = (1.0 / CS137_ENERGY_KEV) + (ELECTRON_REST_ENERGY_KEV / CS137_ENERGY_KEV**2) * x_theory
+    yfit = (1.0 / CS137_ENERGY_KEV) + (ELECTRON_REST_ENERGY_KEV / CS137_ENERGY_KEV**2) * x
+
+    popt, pcov = curve_fit(
+        weighted_linear,
+        x, y,
+        sigma=yerr,
+        absolute_sigma=True,
+        bounds=(0, 2048//FACTOR),
+        maxfev=20000
+    )
+    perr = np.sqrt(np.diag(pcov))
+
+    measured_Cs137_energy, measured_Cs137_energy_err = inverse_with_error(popt[1], perr[1])
+    measured_electron_energy, measured_electron_energy_err = popt[0] * popt[1]**2, perr[0] * popt[1]**2
+
+    yfit = weighted_linear(x, *popt)
+    
+    chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr, 2)
+
+
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        x, y, yerr=yerr,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured data"
+    )
+    ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
+    ax.plot(x_theory, weighted_linear(x_theory, *popt), color=CGREEN, lw=2.5, label="Linear Fit")
+
+    # textbox = (
+    #     r"$\frac{1}{E_\gamma'} = \frac{1}{E_0} + \frac{1}{m_ec^2}(1-\cos\theta)$" "\n"
+    #     f"$E_0$ = {CS137_ENERGY_KEV:.3f} keV\n"
+    #     f"$m_ec^2$ = {ELECTRON_REST_ENERGY_KEV:.3f} keV"
+    # )
+    textbox = (
+        f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+        f"$p$ = {p_value:.3f}"
+    )
+    ax.text(
+        0.98, 0.05, textbox,
+        transform=ax.transAxes, ha="right", va="bottom",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+    )
+
+    ax.set_xlabel(r"$(1-\cos\theta)^{-1}$")
+    ax.set_ylabel(r"$1/E_{e}$ [keV$^{-1}$]")
+    ax.set_title(r"Inverse recoil-electron energy vs $(1-\cos\theta)^{-1}$")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"recoil_energy_vs_angle-{2048//FACTOR}.png"), dpi=200)
+    plt.close()
