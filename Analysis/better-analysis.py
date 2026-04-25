@@ -42,9 +42,9 @@ CGRAY = "#7F7F7F"
 # Systematic-study configuration
 # ============================================================
 
-FACTOR = 16
+FACTOR = 32
 UNIVERSAL_CUTOFF = 120 // FACTOR
-HALF_WIDTH_FIT = 88 // FACTOR
+HALF_WIDTH_FIT = 88 // FACTOR + 1
 PROMINENCE = 20 * FACTOR
 
 SYSTEMATIC_CONFIG = {
@@ -2179,23 +2179,23 @@ if __name__ == "__main__":
     Etots = np.array(Etots)
     Eerrs = np.array(Eerrs)
 
-    # with open('analysis.txt', 'a') as f:
-    #     f.write(f"{FACTOR=} {UNIVERSAL_CUTOFF=} {HALF_WIDTH_FIT=} {PROMINENCE=}\n")
-    #     f.write(str(angles))
-    #     f.write("\n")
-    #     f.write(str(Erecoils))
-    #     f.write("\n")
-    #     f.write(str(Erecoilerrs))
-    #     f.write("\n")
-    #     f.write(str(Escatters))
-    #     f.write("\n")
-    #     f.write(str(Escattererrs))
-    #     f.write("\n")
-    #     f.write(str(Etots))
-    #     f.write("\n")
-    #     f.write(str(Eerrs))
-    #     f.write("\n")
-    # f.close()
+    with open('analysis.txt', 'a') as f:
+        f.write(f"{FACTOR=} {UNIVERSAL_CUTOFF=} {HALF_WIDTH_FIT=} {PROMINENCE=}\n")
+        f.write(str(angles))
+        f.write("\n")
+        f.write(str(Erecoils))
+        f.write("\n")
+        f.write(str(Erecoilerrs))
+        f.write("\n")
+        f.write(str(Escatters))
+        f.write("\n")
+        f.write(str(Escattererrs))
+        f.write("\n")
+        f.write(str(Etots))
+        f.write("\n")
+        f.write(str(Eerrs))
+        f.write("\n")
+    f.close()
 
     mask = ~np.isclose(angles, 310)
     mean_energy, mean_energy_err = mean_with_propagated_uncertainty(Etots, Eerrs)

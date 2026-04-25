@@ -13,7 +13,7 @@ CPURPLE = "#CC79A7"
 CBLACK = "#000000"
 CGRAY = "#7F7F7F"
 
-N = 8
+N = 12
 CS137_ENERGY_KEV = 661.657
 ELECTRON_REST_ENERGY_KEV = 510.99895
 
@@ -64,13 +64,15 @@ mask = ~np.isclose(angles, 310)
 angles = np.mean(angles, axis=0)
 recoils = np.mean(Erecoils, axis=0)
 recoil_errs = np.sqrt(np.sum(Erecoilerrs**2, axis=0))/N
-sys_recoil_err = np.sqrt(np.var(Erecoils)/N)
+sys_recoil_err = np.sqrt(np.var(Erecoils, axis=0))
 scatters = np.mean(Escatters, axis=0)
 scatter_errs = np.sqrt(np.sum(Escattererrs**2, axis=0))/N
-sys_scatter_err = np.sqrt(np.var(Escatters)/N)
+sys_scatter_err = np.sqrt(np.var(Escatters, axis=0))
 tots = np.mean(Etots, axis=0)
 errs = np.sqrt(np.sum(Eerrs**2, axis=0))/N 
-sys_err = np.sqrt(np.var(Etots)/N)
+sys_err = np.sqrt(np.var(Etots, axis=0))
+
+mask1d = ~np.isclose(angles, 310)
 
 mean_energy, mean_energy_err = np.mean(Etots, axis=1), np.sqrt(np.sum(Eerrs**2)) / 10
 mean_energy_no_310, mean_energy_err_no_310 = np.mean(np.resize(Etots[mask],(N,9)), axis=1), np.sqrt(np.sum(np.resize(Eerrs[mask],(N,9))**2)) / 9
@@ -109,23 +111,23 @@ y, yerr = inverse_with_error(scatters, np.sqrt(scatter_errs**2+sys_scatter_err**
 x_theory = np.linspace(0.0, max(1.05 * np.max(x), 2.05), 500)
 y_theory = (1.0 / CS137_ENERGY_KEV) + (1.0 / ELECTRON_REST_ENERGY_KEV) * x_theory
 
-# popt, pcov = curve_fit(
-#     weighted_linear,
-#     x, y,
-#     sigma=yerr,
-#     absolute_sigma=True,
-#     bounds=(0, 256),
-#     maxfev=20000
-# )
-# perr = np.sqrt(np.diag(pcov))
+popt, pcov = curve_fit(
+    weighted_linear,
+    x[mask1d], y[mask1d],
+    sigma=yerr[mask1d],
+    absolute_sigma=True,
+    bounds=(0, 256),
+    maxfev=20000
+)
+perr = np.sqrt(np.diag(pcov))
 
 # measured_Cs137_energy, measured_Cs137_energy_err = inverse_with_error(popt[1], perr[1])
 # measured_electron_energy, measured_electron_energy_err = inverse_with_error(popt[0], perr[0])
 
-# yfit = weighted_linear(x, *popt)
-yfit = weighted_linear(x, 1.0 / ELECTRON_REST_ENERGY_KEV, 1.0 / CS137_ENERGY_KEV)
+yfit = weighted_linear(x, *popt)
+# yfit = weighted_linear(x, 1.0 / ELECTRON_REST_ENERGY_KEV, 1.0 / CS137_ENERGY_KEV)
 
-chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr, 2)
+chi2_val, ndof, p_value = compute_chi2(y[mask1d], yfit[mask1d], yerr[mask1d], 2)
 
 fig, ax = plt.subplots()
 ax.errorbar(
@@ -134,7 +136,7 @@ ax.errorbar(
     label="Measured data"
 )
 ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
-# ax.plot(x_theory, weighted_linear(x_theory, *popt), color=CGREEN, lw=2.5, label="Linear fit")
+ax.plot(x_theory, weighted_linear(x_theory, *popt), color=CGREEN, lw=2.5, label="Linear fit")
 
 textbox = (
     f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
@@ -161,24 +163,24 @@ y, yerr = inverse_with_error(recoils, np.sqrt(recoil_errs**2 + sys_recoil_err**2
 
 x_theory = np.linspace(0.0, max(1.05 * np.max(x), 2.05), 500)
 y_theory = (1.0 / CS137_ENERGY_KEV) + (ELECTRON_REST_ENERGY_KEV / CS137_ENERGY_KEV**2) * x_theory
-yfit = (1.0 / CS137_ENERGY_KEV) + (ELECTRON_REST_ENERGY_KEV / CS137_ENERGY_KEV**2) * x
+# yfit = (1.0 / CS137_ENERGY_KEV) + (ELECTRON_REST_ENERGY_KEV / CS137_ENERGY_KEV**2) * x
 
-# popt, pcov = curve_fit(
-#     weighted_linear,
-#     x, y,
-#     sigma=yerr,
-#     absolute_sigma=True,
-#     bounds=(0, 2048//FACTOR),
-#     maxfev=20000
-# )
-# perr = np.sqrt(np.diag(pcov))
+popt, pcov = curve_fit(
+    weighted_linear,
+    x[mask1d], y[mask1d],
+    sigma=yerr[mask1d],
+    absolute_sigma=True,
+    bounds=(0, 256),
+    maxfev=20000
+)
+perr = np.sqrt(np.diag(pcov))
 
 # measured_Cs137_energy, measured_Cs137_energy_err = inverse_with_error(popt[1], perr[1])
 # measured_electron_energy, measured_electron_energy_err = popt[0] * popt[1]**2, perr[0] * popt[1]**2
 
-# yfit = weighted_linear(x, *popt)
+yfit = weighted_linear(x, *popt)
 
-chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr, 2)
+chi2_val, ndof, p_value = compute_chi2(y[mask1d], yfit[mask1d], yerr[mask1d], 2)
 
 
 fig, ax = plt.subplots()
@@ -188,7 +190,7 @@ ax.errorbar(
     label="Measured data"
 )
 ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
-# ax.plot(x_theory, weighted_linear(x_theory, *popt), color=CGREEN, lw=2.5, label="Linear Fit")
+ax.plot(x_theory, weighted_linear(x_theory, *popt), color=CGREEN, lw=2.5, label="Linear Fit")
 
 # textbox = (
 #     r"$\frac{1}{E_\gamma'} = \frac{1}{E_0} + \frac{1}{m_ec^2}(1-\cos\theta)$" "\n"
@@ -212,3 +214,18 @@ ax.legend(loc="best")
 plt.tight_layout()
 plt.savefig(os.path.join("better-plots\\final", f"recoil_energy_vs_angle-systematic.png"), dpi=200)
 plt.close()
+
+print("="*70)
+print("Uncertainty Budget")
+print("="*70)
+
+print(" "*20 + str(angles))
+print("scatter (val)" + str(scatters))
+print("scatter (stat)" + str(scatter_errs))
+print("scatter (sys)" + str(sys_scatter_err))
+print("recoil (val)" + str(recoils))
+print("recoil (stat)" + str(recoil_errs))
+print("recoil (sys)" + str(sys_recoil_err))
+print("total (val)" + str(tots))
+print("total (stat)" + str(errs))
+print("total (sys)" + str(sys_err))
