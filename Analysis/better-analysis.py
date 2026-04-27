@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
 from scipy.stats import chi2
-from scipy.odr import ODR, Model, RealData
+# from scipy.odr import ODR, Model, RealData
 
 # ============================================================
 # Plot style
@@ -39,6 +39,23 @@ CBLACK = "#000000"
 CGRAY = "#7F7F7F"
 
 # ============================================================
+# Systematic-study configuration
+# ============================================================
+
+FACTOR = 32
+UNIVERSAL_CUTOFF = 120 // FACTOR
+HALF_WIDTH_FIT = 88 // FACTOR + 1
+PROMINENCE = 20 * FACTOR
+
+SYSTEMATIC_CONFIG = {
+    "enabled": False,
+    "fit_half_width_values": [10, 12, 14],
+    "p_value_cut_values": [0.05, 0],
+    "low_bin_cut_shifts": [-10, 0, 10],
+    "cs_peak_rules": ["closest_to_max", "highest_count"],
+}
+
+# ============================================================
 # Physics constants
 # ============================================================
 
@@ -50,30 +67,29 @@ ELECTRON_REST_ENERGY_KEV = 510.99895
 # ============================================================
 
 KNOWN_PEAKS_KEV = {
-    "Na22": np.array([511.0, 1274.537]),
-    "Ba133": np.array([81.0, 276.4, 302.85, 356.01, 383.85]),
+    "Na22": np.array([511.0]),
+    "Ba133": np.array([81.0, 356.01, 661.657]), # last is Cs137 but will use for Ba133 recoil
     "Cs137": np.array([661.657]),
 }
 
 # ============================================================
 # Optional low-bin cutoffs to suppress low-energy noise
-# Values are in REBINNED bins (1024-bin spectra).
+# Values are in REBINNED bins 
 # ============================================================
 
 LOW_BIN_CUTOFFS = {
-    ("03-10", "Na22", "scatter"): 80,
-}
-
-# ============================================================
-# Systematic-study configuration
-# ============================================================
-
-SYSTEMATIC_CONFIG = {
-    "enabled": True,
-    "fit_half_width_values": [10, 12, 14],
-    "p_value_cut_values": [0.05, 0],
-    "low_bin_cut_shifts": [-10, 0, 10],
-    "cs_peak_rules": ["closest_to_max", "highest_count"],
+    ("03-05", "Ba133", "scatter"): UNIVERSAL_CUTOFF,
+    ("03-05", "Ba133", "recoil"): UNIVERSAL_CUTOFF,
+    ("03-05", "Na22", "scatter"): UNIVERSAL_CUTOFF,
+    ("03-05", "Na22", "recoil"): UNIVERSAL_CUTOFF,
+    ("03-10", "Ba133", "scatter"): UNIVERSAL_CUTOFF,
+    ("03-10", "Ba133", "recoil"): UNIVERSAL_CUTOFF,
+    ("03-10", "Na22", "scatter"): UNIVERSAL_CUTOFF,
+    ("03-10", "Na22", "recoil"): UNIVERSAL_CUTOFF,
+    ("03-12", "Ba133", "scatter"): UNIVERSAL_CUTOFF,
+    ("03-12", "Ba133", "recoil"): UNIVERSAL_CUTOFF,
+    ("03-12", "Na22", "scatter"): UNIVERSAL_CUTOFF,
+    ("03-12", "Na22", "recoil"): UNIVERSAL_CUTOFF,
 }
 
 # ============================================================
@@ -262,12 +278,12 @@ def read_spe_file(filepath: str) -> np.ndarray:
 
     return np.array(counts, dtype=float)
 
-def rebin_counts(counts: np.ndarray, factor: int = 2) -> np.ndarray:
+def rebin_counts(counts: np.ndarray, factor: int = 16) -> np.ndarray:
     if len(counts) % factor != 0:
         raise ValueError(f"Counts length {len(counts)} not divisible by rebin factor {factor}")
     return counts.reshape(-1, factor).sum(axis=1)
 
-def load_all_spectra(data_dir: str) -> List[Spectrum]:
+def load_all_spectra(data_dir: str, factor=16) -> List[Spectrum]:
     spectra = []
     for filepath in sorted(glob.glob(os.path.join(data_dir, "*.Spe"))):
         date, source, spec_type, angle = parse_spe_filename(os.path.basename(filepath))
@@ -275,7 +291,7 @@ def load_all_spectra(data_dir: str) -> List[Spectrum]:
         bins_raw = np.arange(len(counts_raw), dtype=float)
 
         if len(counts_raw) == 2048:
-            counts = rebin_counts(counts_raw, factor=2)
+            counts = rebin_counts(counts_raw, factor=factor)
         elif len(counts_raw) == 1024:
             counts = counts_raw.copy()
         else:
@@ -301,6 +317,9 @@ def load_all_spectra(data_dir: str) -> List[Spectrum]:
 # Models and fitting
 # ============================================================
 
+def quadratic(x, a, b, c):
+    return a * x * x + b * x + c
+
 def gaussian_plus_linear(x, A, mu, sigma, b0, b1):
     return A * np.exp(-0.5 * ((x - mu) / sigma) ** 2) + b0 + b1 * x
 
@@ -314,7 +333,7 @@ def compute_chi2(y, yfit, yerr, n_params):
 def weighted_linear(x, m, b):
     return m * x + b
 
-def fit_linear_odr(x, y, sx):
+# def fit_linear_odr(x, y, sx):
     def f_odr(beta, x_):
         return beta[0] * x_ + beta[1]
 
@@ -341,7 +360,7 @@ def find_and_fit_peaks(
     bins: np.ndarray,
     counts: np.ndarray,
     title_prefix: str = "",
-    output_dir: str = "plots",
+    output_dir: str = "better-plots",
     prominence: Optional[float] = None,
     height: Optional[float] = None,
     distance: int = 20,
@@ -411,7 +430,7 @@ def find_and_fit_peaks(
             ax.legend(loc="best")
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_peak_candidates.png"), dpi=200)
-        plt.close(fig)
+        plt.close()
 
     fit_results = []
 
@@ -535,7 +554,7 @@ def find_and_fit_peaks(
             ax.legend(loc="best")
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_candidate_{i+1}_fit.png"), dpi=200)
-            plt.close(fig)
+            plt.close()
 
     if save_plots:
         fig, ax = plt.subplots()
@@ -566,7 +585,7 @@ def find_and_fit_peaks(
         ax.set_title(f"{title_prefix} fitted peaks")
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f"{sanitize_filename(title_prefix)}_fitted_peaks.png"), dpi=200)
-        plt.close(fig)
+        plt.close()
 
     return fit_results
 
@@ -716,7 +735,7 @@ def calibrate_day_type(
     date: str,
     spec_type: str,
     source_peak_results: Dict[str, List[PeakFitResult]],
-    output_dir: str = "plots",
+    output_dir: str = "better-plots",
     known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV,
     interactive: bool = True,
     match_file: str = "manual_matches.json",
@@ -798,7 +817,7 @@ def calibrate_day_type(
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"calibration_{date}_{spec_type}.png"), dpi=200)
-    plt.close(fig)
+    plt.close()
 
     return CalibrationResult(
         date=date,
@@ -823,6 +842,16 @@ def bin_to_energy(bin_value: float, bin_err: float, cal: CalibrationResult):
         + cal.cov[1, 1]
         + (cal.slope**2) * (bin_err**2)
         + 2 * bin_value * cal.cov[0, 1]
+    )
+    return E, math.sqrt(max(varE, 0.0))
+
+def b_to_e(bin_value: float, bin_err: float, m: float, b: float, m_err: float, b_err: float, cross_cov: float):
+    E = m * bin_value + b
+    varE = (
+        (bin_value**2) * m_err * m_err
+        + b_err * b_err
+        + (m**2) * (bin_err**2)
+        + 2 * bin_value * cross_cov
     )
     return E, math.sqrt(max(varE, 0.0))
 
@@ -876,7 +905,7 @@ def make_selected_cs137_peak_plot(
     calibration: CalibrationResult,
     peak_results: List[PeakFitResult],
     selected_peak: PeakFitResult,
-    output_dir: str = "plots",
+    output_dir: str = "better-plots",
     sanity_peak: Optional[PeakFitResult] = None,
     min_bin: int = 0
 ):
@@ -940,13 +969,13 @@ def make_selected_cs137_peak_plot(
         ),
         dpi=200
     )
-    plt.close(fig)
+    plt.close()
 
 # ============================================================
 # Daily calibration overview
 # ============================================================
 
-def make_daily_calibration_overview(date, spectra_map, peak_map, output_dir="plots", low_bin_cutoffs=None):
+def make_daily_calibration_overview(date, spectra_map, peak_map, output_dir="better-plots", low_bin_cutoffs=None):
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     layout = [
         ("scatter", "Na22"),
@@ -997,7 +1026,7 @@ def make_daily_calibration_overview(date, spectra_map, peak_map, output_dir="plo
     fig.suptitle(f"{date} calibration spectra overview", fontsize=22)
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     plt.savefig(os.path.join(output_dir, f"calibration_overview_{date}.png"), dpi=200)
-    plt.close(fig)
+    plt.close()
 
 # ============================================================
 # Energy sum and Compton plots
@@ -1005,7 +1034,7 @@ def make_daily_calibration_overview(date, spectra_map, peak_map, output_dir="plo
 
 def make_energy_sum_plot(
     sums,
-    output_dir="plots",
+    output_dir="better-plots",
     filename="energy_sum_vs_angle.png",
     systematic_summary=None
 ):
@@ -1058,7 +1087,7 @@ def make_energy_sum_plot(
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, filename), dpi=200)
-    plt.close(fig)
+    plt.close()
 
     sys_all = np.nan
     sys_no_310 = np.nan
@@ -1090,7 +1119,7 @@ def make_energy_sum_plot(
 
 def make_inverse_scatter_energy_plot(
     cs_energies,
-    output_dir="plots",
+    output_dir="better-plots",
     incident_energy_keV=CS137_ENERGY_KEV,
     electron_rest_energy_keV=ELECTRON_REST_ENERGY_KEV,
     systematic_summary=None,
@@ -1145,11 +1174,11 @@ def make_inverse_scatter_energy_plot(
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, filename), dpi=200)
-    plt.close(fig)
+    plt.close()
 
 def make_inverse_recoil_energy_plot(
     cs_energies,
-    output_dir="plots",
+    output_dir="better-plots",
     incident_energy_keV=CS137_ENERGY_KEV,
     electron_rest_energy_keV=ELECTRON_REST_ENERGY_KEV,
     systematic_summary=None,
@@ -1214,109 +1243,7 @@ def make_inverse_recoil_energy_plot(
     ax.legend(loc="best")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, filename), dpi=200)
-    plt.close(fig)
-
-# ============================================================
-# Uncertainty budget reporting
-# ============================================================
-
-def print_uncertainty_budget(main_results, sys_summary=None):
-    print("\n" + "=" * 80)
-    print("UNCERTAINTY BUDGET")
-    print("=" * 80)
-
-    print("\nSTATISTICAL UNCERTAINTIES INCLUDED IN THE CODE")
-    print("1. Histogram counting statistics")
-    print("   - Each fitted histogram bin is assigned Poisson uncertainty sqrt(N), with a floor of 1 count.")
-    print("   - This enters every Gaussian + linear peak fit.")
-
-    print("2. Peak-position fit uncertainty")
-    print("   - For each accepted peak, the peak-center uncertainty is taken from the fit covariance matrix:")
-    print("       sigma_mu = sqrt(Cov(mu, mu))")
-    print("   - This is the statistical uncertainty from the local fit model.")
-
-    print("3. Calibration uncertainty")
-    print("   - Daily calibration is done separately for scatter and recoil.")
-    print("   - Na22 and Ba133 calibration points are combined into one fit.")
-    print("   - Orthogonal Distance Regression (ODR) is used so the uncertainty in peak-bin position")
-    print("     is correctly included in the linear calibration fit.")
-
-    print("4. Bin-to-energy propagation")
-    print("   - For E = m b + c, the code propagates:")
-    print("       sigma_E^2 = b^2 Var(m) + Var(c) + m^2 sigma_b^2 + 2 b Cov(m,c)")
-
-    print("5. Sum-energy uncertainty")
-    print("   - For E_sum = E_scatter + E_recoil, the code uses:")
-    print("       sigma_sum = sqrt(sigma_scatter^2 + sigma_recoil^2)")
-    print("   - This is appropriate because scatter and recoil are calibrated separately in the code.")
-
-    print("6. Mean-energy uncertainty")
-    print("   - For the mean of the sums, the reported statistical uncertainty is the propagated")
-    print("     uncertainty of the mean from the individual point uncertainties:")
-    print("       sigma_mean = sqrt(sum_i sigma_i^2) / N")
-    print("   - The sample SEM from the spread is also computed and printed to console.")
-
-    print("\nSYSTEMATIC UNCERTAINTIES ESTIMATED BY THE CODE")
-    print("The code includes an analysis-variation study. It repeats the analysis while varying:")
-    print("   - Gaussian fit half-width")
-    print("   - low-bin cutoff")
-    print("   - p-value threshold for accepting peaks")
-    print("   - Cs137 peak-selection rule (currently only one implemented, but machinery exists)")
-    print("The systematic uncertainty is estimated as the standard deviation of the resulting")
-    print("final quantities across those analysis variations.")
-
-    print("\nSYSTEMATIC UNCERTAINTIES NOT FULLY CAPTURED AUTOMATICALLY")
-    print("1. Manual peak-matching choices")
-    print("   - The calibration uses manually saved Na22/Ba133 peak matches.")
-    print("   - If you choose different valid calibration peaks, results may shift.")
-    print("   - To estimate this, repeat the calibration with alternative reasonable matches.")
-
-    print("2. Model inadequacy in peak fitting")
-    print("   - Peaks are fit with Gaussian + linear background.")
-    print("   - Real detector peaks may be asymmetric or have non-Gaussian tails.")
-    print("   - This is not fully captured by statistical covariance matrices.")
-
-    print("3. Residual calibration nonlinearity")
-    print("   - The code assumes a linear calibration.")
-    print("   - If the detector response is weakly nonlinear, that would be a systematic effect.")
-
-    print("4. Possible angular uncertainty")
-    print("   - The current plots treat scattering angle as exact.")
-    print("   - If you know your angular uncertainty, it should be propagated into")
-    print("     the Compton-relation plots.")
-
-    print("5. Gain drift within a day")
-    print("   - Daily calibration is assumed valid for all spectra from that day/type.")
-    print("   - Time drift within a day is not modeled separately.")
-
-    if main_results.get("mean_results") is not None:
-        mr = main_results["mean_results"]
-        print("\nMEAN SUM RESULTS")
-        print(
-            f"Including 310°: mean = {mr['including_310']['mean_keV']:.2f} keV, "
-            f"stat = {mr['including_310']['stat_err_keV']:.2f} keV, "
-            f"SEM = {mr['including_310']['sem_keV']:.2f} keV"
-        )
-        if np.isfinite(mr["excluding_310"]["mean_keV"]):
-            print(
-                f"Excluding 310°: mean = {mr['excluding_310']['mean_keV']:.2f} keV, "
-                f"stat = {mr['excluding_310']['stat_err_keV']:.2f} keV, "
-                f"SEM = {mr['excluding_310']['sem_keV']:.2f} keV"
-            )
-
-    if sys_summary is not None and main_results.get("mean_results") is not None:
-        stat_all = main_results["mean_results"]["including_310"]["stat_err_keV"]
-        sys_all = sys_summary["mean_including_310_systematic_keV"]
-        tot_all = combine_stat_and_sys(stat_all, sys_all)
-
-        stat_no = main_results["mean_results"]["excluding_310"]["stat_err_keV"]
-        sys_no = sys_summary["mean_excluding_310_systematic_keV"]
-        tot_no = combine_stat_and_sys(stat_no, sys_no)
-
-        print("\nSYSTEMATIC CONTRIBUTIONS TO FINAL MEANS")
-        print(f"Including 310°: systematic = {sys_all:.2f} keV, total = {tot_all:.2f} keV")
-        if np.isfinite(main_results["mean_results"]["excluding_310"]["mean_keV"]):
-            print(f"Excluding 310°: systematic = {sys_no:.2f} keV, total = {tot_no:.2f} keV")
+    plt.close()
 
 # ============================================================
 # Main analysis
@@ -1324,7 +1251,7 @@ def print_uncertainty_budget(main_results, sys_summary=None):
 
 def analyze_compton_data(
     data_dir: str,
-    output_dir: str = "plots",
+    output_dir: str = "better-plots",
     known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV,
     match_file: str = "manual_matches.json",
     force_rematch: bool = False,
@@ -1624,7 +1551,7 @@ def build_systematic_variations(base_low_bin_cutoffs=None):
 
 def run_systematic_study(
     data_dir: str,
-    output_dir: str = "plots",
+    output_dir: str = "better-plots",
     known_peaks_dict: Dict[str, np.ndarray] = KNOWN_PEAKS_KEV,
     match_file: str = "manual_matches.json",
     base_low_bin_cutoffs=None
@@ -1767,83 +1694,640 @@ def summarize_systematics(systematic_runs):
 
 if __name__ == "__main__":
     DATA_DIR = "data"
-    OUTPUT_DIR = "plots"
-    MATCH_FILE = "manual_matches.json"
+    OUTPUT_DIR = "better-plots"
+    DIR_TYPE = {
+        "recoil": "\\recoil",
+        "scatter": "\\scatter",   
+    }
+    DIR_SOURCE = {
+        "Na22": "\\Na22",
+        "Ba133": "\\Ba133",
+        "Cs137": "\\Cs137",
+    }
+    DIR_ANALYSIS = {
+        "raw": "\\raw",
+        "local": "\\local-peaks",
+    }
+    MATCH_FILE = "better-manual_matches.json"
 
-    results = analyze_compton_data(
-        data_dir=DATA_DIR,
-        output_dir=OUTPUT_DIR,
-        known_peaks_dict=KNOWN_PEAKS_KEV,
-        match_file=MATCH_FILE,
-        force_rematch=False,
-        low_bin_cutoffs=LOW_BIN_CUTOFFS,
-        fit_half_width=12,
-        p_value_cut=0.05,
-        cs_peak_rule="closest_to_max",
-        save_plots=True,
-        interactive_calibration=True
+    ###################
+    # FILE MANAGEMENT #
+    ###################
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR+"\\calibrations", exist_ok=True)
+    os.makedirs(OUTPUT_DIR+"\\final", exist_ok=True)
+    for sp_type in DIR_TYPE:
+        for source in DIR_SOURCE:
+            for a in DIR_ANALYSIS:
+                os.makedirs(OUTPUT_DIR + DIR_SOURCE[source] + DIR_TYPE[sp_type] + DIR_ANALYSIS[a], exist_ok=True)
+
+
+    spectra = load_all_spectra(DATA_DIR, factor=FACTOR) # load all histograms
+
+    by_date_type_source = {}
+    for sp in spectra:
+        by_date_type_source.setdefault((sp.date, sp.spec_type, sp.source), []).append(sp)
+
+    #####################
+    # RAW REBINNED DATA #
+    #####################
+    
+    spectra_maps = {}
+
+    all_dates = sorted(set(sp.date for sp in spectra))
+    for date in all_dates:
+        day_spectra_map = {}
+
+        for spec_type in ["scatter", "recoil"]:
+            source_peak_results = {}
+
+            for source in ["Na22", "Ba133", "Cs137"]:
+                key = (date, spec_type, source)
+                if key not in by_date_type_source:
+                    continue
+                
+  
+                sp = by_date_type_source[key]
+                day_spectra_map[(spec_type, source)] = sp
+
+        spectra_maps[date] = day_spectra_map
+
+        for sp_type in ("recoil", "scatter"):
+            for source in ("Na22", "Ba133", "Cs137"):
+                output_dir = OUTPUT_DIR + DIR_SOURCE[source] + DIR_TYPE[sp_type] + DIR_ANALYSIS["raw"]
+                key = (sp_type, source)
+                sp_list = day_spectra_map[key]
+                for sp in sp_list:
+                    min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, LOW_BIN_CUTOFFS)
+                    mask = sp.bins >= min_bin
+                    bins_use = sp.bins[mask]
+                    counts_use = sp.counts[mask]
+
+                    fig, ax = plt.subplots()
+                    ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+                    if source == "Cs137":
+                        ax.set_title(f"{date}: {source} {sp.angle} ({sp_type})")
+                    else:
+                        ax.set_title(f"{date}: {source} ({sp_type})")
+                    ax.set_xlabel("Bin")
+                    ax.set_ylabel("Counts")
+                    plt.tight_layout(rect=[0, 0, 1, 0.97])
+                    if source == "Cs137":
+                        plt.savefig(os.path.join(output_dir, f"{date}-{sp.angle}-rebinned{2048//FACTOR}.png"), dpi=200)
+                    else:
+                        plt.savefig(os.path.join(output_dir, f"{date}-rebinned{2048//FACTOR}.png"), dpi=200)
+                    plt.close()
+    
+    ####################
+    # SINGLE NA22 PEAK #
+    ####################
+    Na22_peak_locations = {}
+    Na22_peak_errors = {}
+    for date in all_dates:
+        for sp_type in ("recoil", "scatter"):
+            output_dir = OUTPUT_DIR + DIR_SOURCE["Na22"] + DIR_TYPE[sp_type] + DIR_ANALYSIS["local"]
+            sp_Na22 = spectra_maps[date][(sp_type, "Na22")][0]
+
+            min_bin = get_low_bin_cutoff(sp_Na22.date, sp_Na22.source, sp_Na22.spec_type, sp_Na22.angle, LOW_BIN_CUTOFFS)
+            mask = sp_Na22.bins >= min_bin
+            
+            counts = sp_Na22.counts
+            bins = sp_Na22.bins
+
+            max_bin_index = int(np.argmax(counts[mask])) + min_bin
+
+            bins_use = bins[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+            counts_use = counts[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+
+            # print(max_bin_index)
+
+            left = max(0, max_bin_index - HALF_WIDTH_FIT)
+            right = min(len(bins_use) - 1, max_bin_index + HALF_WIDTH_FIT)
+
+            xfit = bins_use
+            yfit = counts_use
+            yerr = poisson_errors(yfit)
+
+            A0 = max(yfit) - np.median(yfit)
+            mu0 = max_bin_index
+            sigma0 = max(1.5, HALF_WIDTH_FIT / 4)
+            b00 = np.median(yfit)
+            b10 = 0.0
+
+            lower = [0, xfit.min(), 0.5, -np.inf, -np.inf]
+            upper = [np.inf, xfit.max(), HALF_WIDTH_FIT, np.inf, np.inf]
+
+            popt, pcov = curve_fit(
+                gaussian_plus_linear,
+                xfit, yfit,
+                p0=[A0, mu0, sigma0, b00, b10],
+                sigma=yerr,
+                absolute_sigma=True,
+                bounds=(lower, upper),
+                maxfev=20000
+            )
+            model = gaussian_plus_linear(xfit, *popt)
+            chi2_val, ndof, p_value = compute_chi2(yfit, model, yerr, 5)
+            perr = np.sqrt(np.diag(pcov))
+
+            xdense = np.linspace(xfit.min(), xfit.max(), 400)
+            ydense = gaussian_plus_linear(xdense, *popt)
+            peak_plot = popt[1]
+            peak_plot_err = perr[1]
+
+            Na22_peak_locations[f"{date}-{sp_type}", 511] = peak_plot
+            Na22_peak_errors[f"{date}-{sp_type}", 511] = peak_plot_err
+
+            fig, ax = plt.subplots()
+            ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+            ax.set_title(f"{date}: Na22 ({sp_type})")
+            ax.set_xlabel("Bin")
+            ax.set_ylabel("Counts")
+            ax.plot(xdense, ydense, color=CRED, lw=2.5, label="Gaussian + linear fit")
+            ax.axvline(peak_plot, color=CGREEN, ls="--", lw=2,
+                        label=f"Peak = {peak_plot:.2f} ± {peak_plot_err:.2f}")
+
+            textbox = (
+                f"$\\mu$ = {peak_plot:.2f} ± {peak_plot_err:.2f}\n"
+                f"$\\sigma$ = {popt[2]:.2f} ± {perr[2]:.2f} bins\n"
+                f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+                f"$p$ = {p_value:.3f}\n"
+            )
+            ax.text(
+                0.98, 0.95, textbox, transform=ax.transAxes,
+                ha="right", va="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+            )
+            plt.tight_layout(rect=[0, 0, 1, 0.97])
+            plt.savefig(os.path.join(output_dir, f"{date}-local_peak-{2048//FACTOR}.png"), dpi=200)
+            plt.close()
+
+    ###############
+    # Ba133 Peaks #
+    ###############
+    Ba133_peak_locations = {}
+    Ba133_peak_errors = {}
+    for date in all_dates:
+        for sp_type in ("recoil", "scatter"):
+            output_dir = OUTPUT_DIR + DIR_SOURCE["Ba133"] + DIR_TYPE[sp_type] + DIR_ANALYSIS["local"]
+            sp_Ba133 = spectra_maps[date][(sp_type, "Ba133")][0]
+
+            min_bin = get_low_bin_cutoff(sp_Ba133.date, sp_Ba133.source, sp_Ba133.spec_type, sp_Ba133.angle, LOW_BIN_CUTOFFS)
+            mask = sp_Ba133.bins >= min_bin
+
+            counts = sp_Ba133.counts
+            counts_use = counts[mask]
+            bins = sp_Ba133.bins
+            bins_use = bins[mask]
+            
+            # Candidates from find_peaks
+            peaks, _ = find_peaks(counts_use, distance=2*HALF_WIDTH_FIT, prominence=PROMINENCE)
+
+            fig, ax = plt.subplots()
+            ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+            ax.vlines(bins_use[peaks], 0, counts_use[peaks], colors=CORANGE)
+            ax.set_title(f"{date}: Ba133 ({sp_type})")
+            ax.set_xlabel("Bin")
+            ax.set_ylabel("Counts")
+            plt.tight_layout(rect=[0, 0, 1, 0.97])
+            plt.savefig(os.path.join(output_dir, f"{date}-candidates-{2048//FACTOR}.png"), dpi=200)
+            plt.close()
+
+            # Refinement
+            indices = [(0, 81), (1, 160), (-1, 356)] if sp_type == "scatter" else [(0, 81), (1, 160), (-2, 356)]
+
+            for index in indices:
+                max_bin_index = peaks[index[0]] + min_bin
+
+                bins_use = bins[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+                counts_use = counts[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+
+                left = max(0, max_bin_index - HALF_WIDTH_FIT)
+                right = min(len(bins_use) - 1, max_bin_index + HALF_WIDTH_FIT)
+
+                xfit = bins_use
+                yfit = counts_use
+                yerr = poisson_errors(yfit)
+
+                A0 = max(yfit) - np.median(yfit)
+                mu0 = max_bin_index
+                sigma0 = max(1.5, HALF_WIDTH_FIT / 4)
+                b00 = np.median(yfit)
+                b10 = 0.0
+
+                lower = [0, xfit.min(), 0.5, -np.inf, -np.inf]
+                upper = [np.inf, xfit.max(), HALF_WIDTH_FIT, np.inf, np.inf]
+
+                popt, pcov = curve_fit(
+                    gaussian_plus_linear,
+                    xfit, yfit,
+                    p0=[A0, mu0, sigma0, b00, b10],
+                    sigma=yerr,
+                    absolute_sigma=True,
+                    bounds=(lower, upper),
+                    maxfev=20000
+                )
+                model = gaussian_plus_linear(xfit, *popt)
+                chi2_val, ndof, p_value = compute_chi2(yfit, model, yerr, 5)
+                perr = np.sqrt(np.diag(pcov))
+
+                xdense = np.linspace(xfit.min(), xfit.max(), 400)
+                ydense = gaussian_plus_linear(xdense, *popt)
+                peak_plot = popt[1]
+                peak_plot_err = perr[1]
+
+                Ba133_peak_locations[f"{date}-{sp_type}", index[1]] = peak_plot
+                Ba133_peak_errors[f"{date}-{sp_type}", index[1]] = peak_plot_err
+
+                fig, ax = plt.subplots()
+                ax.bar(bins_use, counts_use, width=1.0, color=CBLUE, edgecolor=None, linewidth=0)
+                ax.set_title(f"{date}: Ba133 ({sp_type})")
+                ax.set_xlabel("Bin")
+                ax.set_ylabel("Counts")
+                ax.plot(xdense, ydense, color=CRED, lw=2.5, label="Gaussian + linear fit")
+                ax.axvline(peak_plot, color=CGREEN, ls="--", lw=2,
+                            label=f"Peak = {peak_plot:.2f} ± {peak_plot_err:.2f}")
+
+                textbox = (
+                    f"$\\mu$ = {peak_plot:.2f} ± {peak_plot_err:.2f}\n"
+                    f"$\\sigma$ = {popt[2]:.2f} ± {perr[2]:.2f} bins\n"
+                    f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+                    f"$p$ = {p_value:.3f}\n"
+                )
+                ax.text(
+                    0.98, 0.95, textbox, transform=ax.transAxes,
+                    ha="right", va="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+                )
+                plt.tight_layout(rect=[0, 0, 1, 0.97])
+                plt.savefig(os.path.join(output_dir, f"{date}-local_peak{index[1]}-{2048//FACTOR}.png"), dpi=200)
+                plt.close()
+    
+    #############
+    # CALIBRATE #
+    #############
+    calibrations = {}
+    calibration_errors = {}
+    calibration_cross_covs = {}
+    for date in all_dates:
+        for sp_type in ["scatter", "recoil"]:
+            output_dir = OUTPUT_DIR + "\\calibrations"
+
+            xfit = np.array([511, 356, 160, 81])
+            yfit = np.array([Na22_peak_locations[f"{date}-{sp_type}", 511], Ba133_peak_locations[f"{date}-{sp_type}", 356], Ba133_peak_locations[f"{date}-{sp_type}", 160], Ba133_peak_locations[f"{date}-{sp_type}", 81]])
+            yerr = np.array([Na22_peak_errors[f"{date}-{sp_type}", 511], Ba133_peak_errors[f"{date}-{sp_type}", 356], Ba133_peak_errors[f"{date}-{sp_type}", 160], Ba133_peak_errors[f"{date}-{sp_type}", 81]])
+            
+            popt, pcov = curve_fit(
+                weighted_linear,
+                xfit, yfit,
+                sigma=yerr,
+                absolute_sigma=True,
+                bounds=(0, 2048//FACTOR),
+                maxfev=20000
+            )
+            # Swap x and y !!! BE CAREFUL
+            m = 1 / popt[0]
+            b = - popt[1] / popt[0]
+            model = weighted_linear(yfit, m, b)
+            chi2_val, ndof, p_value = compute_chi2(xfit, model, m*yerr, 2)
+
+            perr = np.sqrt(np.diag(pcov))
+            m_err = m * m * perr[0]
+            b_err = m * perr[1] - m * b * perr[0] 
+
+            calibrations[f"{date}-{sp_type}"] = m, b
+            calibration_errors[f"{date}-{sp_type}"] = m_err, b_err
+            calibration_cross_covs[f"{date}-{sp_type}"] = pcov[0,1]
+
+            xdense = np.linspace(yfit.min(), yfit.max(), 400)
+            ydense = weighted_linear(xdense, m, b)
+
+            fig, ax = plt.subplots()
+            ax.scatter(yfit, xfit, color=CPURPLE)
+            ax.set_title(f"{date}: Calibration")
+            ax.set_xlabel("Bin")
+            ax.set_ylabel("Energy [keV]")
+            ax.plot(xdense, ydense, color=CRED, lw=2.5, label="Linear Fit")
+
+            textbox = (
+                f"$m$ = {m:.2f} ± {m_err:.2f} keV/bin\n"
+                f"$b$ = {b:.2f} ± {b_err:.2f} bins\n"
+                f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+                f"$p$ = {p_value:.3f}\n"
+            )
+            ax.text(
+                0.02, 0.95, textbox, transform=ax.transAxes,
+                ha="left", va="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+            )
+            plt.tight_layout(rect=[0, 0, 1, 0.97])
+            plt.savefig(os.path.join(output_dir, f"{date}-{sp_type}-{2048//FACTOR}.png"), dpi=200)
+            plt.close()
+
+    ###############################
+    # Cs137 Raw After Calibration #
+    ###############################
+
+    for sp_type in ("recoil", "scatter"):
+        for date in all_dates:
+            output_dir = OUTPUT_DIR + DIR_SOURCE["Cs137"] + DIR_TYPE[sp_type] + DIR_ANALYSIS["raw"]
+            key = (sp_type, "Cs137")
+            sp_list = spectra_maps[date][key]
+            for sp in sp_list:
+                min_bin = get_low_bin_cutoff(sp.date, sp.source, sp.spec_type, sp.angle, LOW_BIN_CUTOFFS)
+                mask = sp.bins >= min_bin
+
+                m, b = calibrations[f"{date}-{sp_type}"]
+                energies_use = m * sp.bins[mask] + b
+                counts_use = sp.counts[mask]
+
+                fig, ax = plt.subplots()
+                ax.bar(energies_use, counts_use, width=m*1.0, color=CBLUE, edgecolor=None, linewidth=0)
+                ax.set_title(f"{date}: Cs137 {sp.angle} ({sp_type})")
+                ax.set_xlabel("Energy [keV]")
+                ax.set_ylabel("Counts")
+                plt.tight_layout(rect=[0, 0, 1, 0.97])
+                plt.savefig(os.path.join(output_dir, f"{date}-{sp.angle}-calibrated-rebinned{2048//FACTOR}.png"), dpi=200)
+
+    #####################
+    # Cs137 Single Peak #
+    #####################
+    Cs137_peak_locations = {}
+    Cs137_peak_errors = {}
+    for date in all_dates:
+        for sp_type in ("recoil", "scatter"):
+            output_dir = OUTPUT_DIR + DIR_SOURCE["Cs137"] + DIR_TYPE[sp_type] + DIR_ANALYSIS["local"]
+            sp_list = spectra_maps[date][(sp_type, "Cs137")]
+
+            for sp_Cs137 in sp_list:
+                min_bin = get_low_bin_cutoff(sp_Cs137.date, sp_Cs137.source, sp_Cs137.spec_type, sp_Cs137.angle, LOW_BIN_CUTOFFS)
+                mask = sp_Cs137.bins >= min_bin
+                
+                counts = sp_Cs137.counts
+                bins = sp_Cs137.bins
+
+                max_bin_index = int(np.argmax(counts[mask])) + min_bin
+
+                bins_use = bins[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+                counts_use = counts[max_bin_index-HALF_WIDTH_FIT:max_bin_index+HALF_WIDTH_FIT+1]
+
+                left = max(0, max_bin_index - HALF_WIDTH_FIT)
+                right = min(len(bins_use) - 1, max_bin_index + HALF_WIDTH_FIT)
+
+                xfit = bins_use
+                yfit = counts_use
+                yerr = poisson_errors(yfit)
+
+                A0 = max(yfit) - np.median(yfit)
+                mu0 = max_bin_index
+                sigma0 = max(1.5, HALF_WIDTH_FIT / 4)
+                b00 = np.median(yfit)
+                b10 = 0.0
+
+                lower = [0, xfit.min(), 0.5, -np.inf, -np.inf]
+                upper = [np.inf, xfit.max(), HALF_WIDTH_FIT, np.inf, np.inf]
+
+                popt, pcov = curve_fit(
+                    gaussian_plus_linear,
+                    xfit, yfit,
+                    p0=[A0, mu0, sigma0, b00, b10],
+                    sigma=yerr,
+                    absolute_sigma=True,
+                    bounds=(lower, upper),
+                    maxfev=20000
+                )
+                model = gaussian_plus_linear(xfit, *popt)
+                chi2_val, ndof, p_value = compute_chi2(yfit, model, yerr, 5)
+                perr = np.sqrt(np.diag(pcov))
+
+                xdense = np.linspace(xfit.min(), xfit.max(), 400)
+                ydense = gaussian_plus_linear(xdense, *popt)
+                peak_plot = popt[1]
+                peak_plot_err = perr[1]
+
+                m, b = calibrations[f"{date}-{sp_type}"]
+                m_err, b_err = calibration_errors[f"{date}-{sp_type}"]
+                cross_cov = calibration_cross_covs[f"{date}-{sp_type}"]
+
+                peak_energy, peak_energy_err = b_to_e(peak_plot, peak_plot_err, m, b, m_err, b_err, cross_cov)
+                sigma, sigma_err = b_to_e(popt[2], perr[2], m, b, m_err, b_err, cross_cov)
+
+                Cs137_peak_locations[sp_Cs137.angle, sp_type] = peak_energy
+                Cs137_peak_errors[sp_Cs137.angle, sp_type] = peak_energy_err
+
+                fig, ax = plt.subplots()
+                ax.bar(m*bins_use+b, counts_use, width=m*1.0, color=CBLUE, edgecolor=None, linewidth=0)
+                ax.set_title(f"{date}: Cs137 {sp_Cs137.angle} ({sp_type})")
+                ax.set_xlabel("Energy [keV]")
+                ax.set_ylabel("Counts")
+                ax.plot(m*xdense+b, ydense, color=CRED, lw=2.5, label="Gaussian + linear fit")
+                ax.axvline(peak_energy, color=CGREEN, ls="--", lw=2,
+                            label=f"Peak = {peak_energy:.2f} ± {peak_energy_err:.2f}")
+
+                textbox = (
+                    f"$\\mu$ = {peak_energy:.2f} ± {peak_energy_err:.2f} keV\n"
+                    f"$\\sigma$ = {sigma:.2f} ± {sigma_err:.2f} keV\n"
+                    f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+                    f"$p$ = {p_value:.3f}\n"
+                )
+                ax.text(
+                    0.98, 0.95, textbox, transform=ax.transAxes,
+                    ha="right", va="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+                )
+                plt.tight_layout(rect=[0, 0, 1, 0.97])
+                plt.savefig(os.path.join(output_dir, f"{date}-{sp_Cs137.angle}-local_peak-{2048//FACTOR}.png"), dpi=200)
+                plt.close()
+    
+    ####################
+    # Experiment Goals #
+    ####################
+
+    # Energy Sum
+
+    peaks_by_angle = {}
+    output_dir = OUTPUT_DIR + "\\final"
+    for (theta, sp_type) in Cs137_peak_locations:
+        print(theta)
+        if theta in peaks_by_angle:
+            peaks_by_angle[theta].append((sp_type, Cs137_peak_locations[theta, sp_type], Cs137_peak_errors[theta, sp_type]))
+        else:
+            peaks_by_angle[theta] = [(sp_type, Cs137_peak_locations[theta, sp_type], Cs137_peak_errors[theta, sp_type])]
+
+    angles = []
+    Erecoils = []
+    Erecoilerrs = []
+    Escatters = []
+    Escattererrs = []
+    Etots = []
+    Eerrs = []
+    for theta in peaks_by_angle:
+        angles.append(theta)
+        Erecoils.append(peaks_by_angle[theta][0][1] if peaks_by_angle[theta][0][0] == "recoil" else peaks_by_angle[theta][1][1])
+        Erecoilerrs.append(peaks_by_angle[theta][0][2] if peaks_by_angle[theta][0][0] == "recoil" else peaks_by_angle[theta][1][2])
+        Escatters.append(peaks_by_angle[theta][0][1] if peaks_by_angle[theta][0][0] == "scatter" else peaks_by_angle[theta][1][1])
+        Escattererrs.append(peaks_by_angle[theta][0][2] if peaks_by_angle[theta][0][0] == "scatter" else peaks_by_angle[theta][1][2])
+        Etots.append(peaks_by_angle[theta][0][1]+peaks_by_angle[theta][1][1])
+        Eerrs.append(np.sqrt(peaks_by_angle[theta][0][2]**2 + peaks_by_angle[theta][1][2]**2))
+    
+    angles = np.array(angles)
+    Erecoils = np.array(Erecoils)
+    Erecoilerrs = np.array(Erecoilerrs)
+    Escatters = np.array(Escatters)
+    Escattererrs = np.array(Escattererrs)
+    Etots = np.array(Etots)
+    Eerrs = np.array(Eerrs)
+
+    with open('analysis.txt', 'a') as f:
+        f.write(f"{FACTOR=} {UNIVERSAL_CUTOFF=} {HALF_WIDTH_FIT=} {PROMINENCE=}\n")
+        f.write(str(angles))
+        f.write("\n")
+        f.write(str(Erecoils))
+        f.write("\n")
+        f.write(str(Erecoilerrs))
+        f.write("\n")
+        f.write(str(Escatters))
+        f.write("\n")
+        f.write(str(Escattererrs))
+        f.write("\n")
+        f.write(str(Etots))
+        f.write("\n")
+        f.write(str(Eerrs))
+        f.write("\n")
+    f.close()
+
+    mask = ~np.isclose(angles, 310)
+    mean_energy, mean_energy_err = mean_with_propagated_uncertainty(Etots, Eerrs)
+    mean_energy_no_310, mean_energy_err_no_310 = mean_with_propagated_uncertainty(Etots[mask], Eerrs[mask])
+
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        angles, Etots, yerr=Eerrs,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured sums"
+    )
+    ax.axhline(mean_energy, color=CRED, lw=2.5, ls='--',
+               label=f"Mean: {mean_energy:.1f} ± {mean_energy_err:.1f} keV")
+    ax.axhline(mean_energy_no_310, color=CGREEN, lw=2.5, ls='--',
+               label=f"Mean w/o 310: {mean_energy_no_310:.1f} ± {mean_energy_err_no_310:.1f} keV")
+    ax.axhline(661.567, color=CPURPLE, lw=2.5, ls='--',
+               label=f"Expected: {661.657:.1f} keV")
+    ax.set_xlabel("Scattering angle [deg]")
+    ax.set_ylabel(r"$E_{\gamma} + E_{e}$ [keV]")
+    ax.set_title("Sum of scatter and recoil energies vs angle")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"energy_sum_vs_angle-{2048//FACTOR}.png"), dpi=200)
+    plt.close()
+
+    # Scatter Energy Plot
+
+    x = one_minus_cos_theta(angles)
+    y, yerr = inverse_with_error(Escatters, Escattererrs)
+
+    x_theory = np.linspace(0.0, max(1.05 * np.max(x), 2.05), 500)
+    y_theory = (1.0 / CS137_ENERGY_KEV) + (1.0 / ELECTRON_REST_ENERGY_KEV) * x_theory
+
+    popt, pcov = curve_fit(
+        weighted_linear,
+        x, y,
+        sigma=yerr,
+        absolute_sigma=True,
+        bounds=(0, 2048//FACTOR),
+        maxfev=20000
+    )
+    perr = np.sqrt(np.diag(pcov))
+
+    measured_Cs137_energy, measured_Cs137_energy_err = inverse_with_error(popt[1], perr[1])
+    measured_electron_energy, measured_electron_energy_err = inverse_with_error(popt[0], perr[0])
+
+    yfit = weighted_linear(x, *popt)
+    
+    chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr, 2)
+
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        x, y, yerr=yerr,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured data"
+    )
+    ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
+    ax.plot(x_theory, weighted_linear(x_theory, *popt), color=CGREEN, lw=2.5, label="Linear fit")
+
+    textbox = (
+        f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+        f"$p$ = {p_value:.3f}"
+    )
+    ax.text(
+        0.98, 0.95, textbox,
+        transform=ax.transAxes, ha="right", va="top",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
     )
 
-    sys_summary = None
-    if SYSTEMATIC_CONFIG["enabled"]:
-        sys_runs = run_systematic_study(
-            data_dir=DATA_DIR,
-            output_dir=OUTPUT_DIR,
-            known_peaks_dict=KNOWN_PEAKS_KEV,
-            match_file=MATCH_FILE,
-            base_low_bin_cutoffs=LOW_BIN_CUTOFFS
-        )
-        sys_summary = summarize_systematics(sys_runs)
+    ax.set_xlabel(r"$1-\cos\theta$")
+    ax.set_ylabel(r"$1/E_{\gamma}$ [keV$^{-1}$]")
+    ax.set_title(r"Inverse scattered-photon energy vs $1-\cos\theta$")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"scatter_energy_vs_angle-{2048//FACTOR}.png"), dpi=200)
+    plt.close()
 
-        if sys_summary is not None:
-            print("\n" + "=" * 80)
-            print("Systematic uncertainty summary")
-            print("=" * 80)
+    # Recoil Energy Plot
 
-            print("\nBy angle:")
-            for angle in sorted(sys_summary["sum_by_angle"].keys()):
-                sys_err = sys_summary["sum_by_angle"][angle]["systematic_err_keV"]
-                print(f"  angle = {angle:6.1f} deg: systematic = {sys_err:.2f} keV")
+    x = 1 / one_minus_cos_theta(angles)
+    y, yerr = inverse_with_error(Erecoils, Erecoilerrs)
 
-            if results["mean_results"] is not None:
-                stat_all = results["mean_results"]["including_310"]["stat_err_keV"]
-                sys_all = sys_summary["mean_including_310_systematic_keV"]
-                tot_all = combine_stat_and_sys(stat_all, sys_all)
+    x_theory = np.linspace(0.0, max(1.05 * np.max(x), 2.05), 500)
+    y_theory = (1.0 / CS137_ENERGY_KEV) + (ELECTRON_REST_ENERGY_KEV / CS137_ENERGY_KEV**2) * x_theory
+    yfit = (1.0 / CS137_ENERGY_KEV) + (ELECTRON_REST_ENERGY_KEV / CS137_ENERGY_KEV**2) * x
 
-                stat_no = results["mean_results"]["excluding_310"]["stat_err_keV"]
-                sys_no = sys_summary["mean_excluding_310_systematic_keV"]
-                tot_no = combine_stat_and_sys(stat_no, sys_no)
+    popt, pcov = curve_fit(
+        weighted_linear,
+        x, y,
+        sigma=yerr,
+        absolute_sigma=True,
+        bounds=(0, 2048//FACTOR),
+        maxfev=20000
+    )
+    perr = np.sqrt(np.diag(pcov))
 
-                print("\nMean including 310°:")
-                print(f"  statistical = {stat_all:.2f} keV")
-                print(f"  systematic  = {sys_all:.2f} keV")
-                print(f"  total       = {tot_all:.2f} keV")
+    measured_Cs137_energy, measured_Cs137_energy_err = inverse_with_error(popt[1], perr[1])
+    measured_electron_energy, measured_electron_energy_err = popt[0] * popt[1]**2, perr[0] * popt[1]**2
 
-                print("\nMean excluding 310°:")
-                print(f"  statistical = {stat_no:.2f} keV")
-                print(f"  systematic  = {sys_no:.2f} keV")
-                print(f"  total       = {tot_no:.2f} keV")
+    yfit = weighted_linear(x, *popt)
+    
+    chi2_val, ndof, p_value = compute_chi2(y, yfit, yerr, 2)
 
-            # Remake plots including systematic uncertainties in point error bars
-            make_energy_sum_plot(
-                results["energy_sums"],
-                output_dir=OUTPUT_DIR,
-                filename="energy_sum_vs_angle_with_systematics.png",
-                systematic_summary=sys_summary
-            )
 
-            make_inverse_scatter_energy_plot(
-                cs_energies=results["cs_energies"],
-                output_dir=OUTPUT_DIR,
-                systematic_summary=sys_summary,
-                filename="inverse_scatter_energy_vs_one_minus_cos_with_systematics.png"
-            )
+    fig, ax = plt.subplots()
+    ax.errorbar(
+        x, y, yerr=yerr,
+        fmt='o', color=CBLUE, ecolor=CBLUE, capsize=4, markersize=8,
+        label="Measured data"
+    )
+    ax.plot(x_theory, y_theory, color=CRED, lw=2.5, label="Compton prediction")
+    ax.plot(x_theory, weighted_linear(x_theory, *popt), color=CGREEN, lw=2.5, label="Linear Fit")
 
-            make_inverse_recoil_energy_plot(
-                cs_energies=results["cs_energies"],
-                output_dir=OUTPUT_DIR,
-                systematic_summary=sys_summary,
-                filename="inverse_recoil_energy_vs_inv_one_minus_cos_with_systematics.png"
-            )
+    # textbox = (
+    #     r"$\frac{1}{E_\gamma'} = \frac{1}{E_0} + \frac{1}{m_ec^2}(1-\cos\theta)$" "\n"
+    #     f"$E_0$ = {CS137_ENERGY_KEV:.3f} keV\n"
+    #     f"$m_ec^2$ = {ELECTRON_REST_ENERGY_KEV:.3f} keV"
+    # )
+    textbox = (
+        f"$\\chi^2$/ndof = {chi2_val:.2f}/{ndof}\n"
+        f"$p$ = {p_value:.3f}"
+    )
+    ax.text(
+        0.98, 0.05, textbox,
+        transform=ax.transAxes, ha="right", va="bottom",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black")
+    )
 
-    print_uncertainty_budget(results, sys_summary)
+    ax.set_xlabel(r"$(1-\cos\theta)^{-1}$")
+    ax.set_ylabel(r"$1/E_{e}$ [keV$^{-1}$]")
+    ax.set_title(r"Inverse recoil-electron energy vs $(1-\cos\theta)^{-1}$")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"recoil_energy_vs_angle-{2048//FACTOR}.png"), dpi=200)
+    plt.close()
