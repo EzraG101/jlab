@@ -1,0 +1,4 @@
+.venv/
+.mplconfig/
+__pycache__/
+shot_noise_analysis/__pycache__/

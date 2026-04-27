@@ -1,3 +1,8 @@
 .DS_Store
-**/presentation/
 __pycache__/
+
+.venv/
+.mplconfig/
+
+# ignore anythign in a presentation/ folder
+presentation/
